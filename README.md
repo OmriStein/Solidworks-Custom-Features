@@ -3,6 +3,9 @@
 SOLIDWORKS 2026 add-in (C#, .NET Framework 4, x64) that hosts custom features under **Insert > Custom-Features**.
 
 ## CNC Chamfer
+
+![CNC Chamfer demo](docs/cnc-chamfer.gif)
+
 A 45° chamfer that can actually be machined with a 90° chamfer mill:
 - Straight, convex, 90° edges.
 - Ends that run into a wall stop at tool radius + clearance and finish with the cone the chamfer mill leaves.
