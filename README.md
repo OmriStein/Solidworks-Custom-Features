@@ -11,12 +11,16 @@ A 45° chamfer that can actually be machined with a 90° chamfer mill:
 - Optional flat corner where three chamfers meet (like the native Chamfer).
 - Live native-style preview, edit, Ctrl+C / Ctrl+V of the feature settings.
 
-## Install / uninstall
-Close SOLIDWORKS, then run `install.bat` (asks for administrator rights). It builds `out\CustomFeatures.dll`
-(needs the Visual Studio C# compiler and the SOLIDWORKS API redist) and registers it. In SOLIDWORKS the add-in
-is listed as **Custom-Features** in Tools > Add-Ins.
+## Install
+**From a release:** download `CustomFeatures-vX.Y.Z.zip` from the GitHub Releases page, extract it to a permanent folder
+(the add-in is registered from that location), close SOLIDWORKS and run `install.bat` (asks for administrator rights).
+In SOLIDWORKS the add-in is listed as **Custom-Features** in Tools > Add-Ins.
 
-`uninstall.bat` removes the registration.
+**From source:** close SOLIDWORKS and run `install.bat` in the repository. It builds `out\CustomFeatures.dll`
+(needs the Visual Studio C# compiler and the SOLIDWORKS API redist) and registers it.
 
-For development, `build.bat` only rebuilds the DLL (SOLIDWORKS must be closed, it locks the DLL);
+`uninstall.bat` removes the registration. Requires SOLIDWORKS 2026 (x64).
+
+## Development
+`build.bat` only rebuilds the DLL (SOLIDWORKS must be closed, it locks the DLL);
 `dev.ps1` closes SOLIDWORKS, rebuilds and restarts it. Test parts are in `test\`.
