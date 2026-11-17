@@ -1,0 +1,7 @@
+# build output (rebuild with build.bat)
+out/
+*.dll
+*.pdb
+# SOLIDWORKS lock/temp files
+~$*
+*.reg
