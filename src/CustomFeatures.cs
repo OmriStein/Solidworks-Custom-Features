@@ -30,18 +30,21 @@ namespace MfgChamfer
         public double Size = 0.001;        // chamfer leg length
         public double ToolDia = 0.006;     // chamfer mill body diameter
         public double Clearance = 0.0005;  // extra gap between tool and wall
-        public string Flips = "";          // per edge, in selection order: '1' = machine from the other face
+        public string Flips = "";          // per edge, in selection order: '1' = machine from the other face (also = edge count)
+        public bool LegacyFlips;           // very old feature: one flag for all edges, no per-edge count
+        public string Edges = "";          // end points of each edge at the last OK (m): "x0,y0,z0,x1,y1,z1;..." - to show missing ones
         public bool Blend = true;          // blend two perpendicular chamfers around an inside corner (old features: off)
         public bool Flat = false;          // flat triangle where three chamfers meet at an outside corner (like native Chamfer)
 
         public bool FlipAt(int i) { return i < Flips.Length && Flips[i] == '1'; }
 
-        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner" };
+        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner", "Edges" };
         public static readonly int[] Types =
         {
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString
@@ -50,7 +53,7 @@ namespace MfgChamfer
         public string[] Values()
         {
             var c = CultureInfo.InvariantCulture;
-            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0" };
+            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0", Edges ?? "" };
         }
 
         // Replaces the whole parameter set (also upgrades features made with older versions)
@@ -58,17 +61,19 @@ namespace MfgChamfer
         {
             // Set by name (SetParameters alone was not picked up by ModifyDefinition).
             // Features from older versions have no "Flips" parameter yet: then redefine the whole set.
-            string probe, probe2, probe3;
+            string probe, probe2, probe3, probe4;
             d.GetStringByName("Flips", out probe);
             d.GetStringByName("Blend", out probe2);
             d.GetStringByName("Corner", out probe3);
-            if (probe == null || probe2 == null || probe3 == null) d.SetParameters(Names, Types, Values());
+            d.GetStringByName("Edges", out probe4);
+            if (probe == null || probe2 == null || probe3 == null || probe4 == null) d.SetParameters(Names, Types, Values());
             d.SetDoubleByName("Size", Size);
             d.SetDoubleByName("ToolDia", ToolDia);
             d.SetDoubleByName("Clearance", Clearance);
             d.SetStringByName("Flips", Flips ?? "");
             d.SetStringByName("Blend", Blend ? "1" : "0");
             d.SetStringByName("Corner", Flat ? "1" : "0");
+            d.SetStringByName("Edges", Edges ?? "");
         }
 
         public static ChamferParams Read(IMacroFeatureData d)
@@ -80,13 +85,37 @@ namespace MfgChamfer
             d.GetDoubleByName("Clearance", out v); if (v >= 0) p.Clearance = v;
             d.GetStringByName("Flips", out f);
             if (!string.IsNullOrEmpty(f)) p.Flips = f;
-            else { d.GetIntegerByName("Flip", out i); if (i != 0) p.Flips = new string('1', 64); }   // older versions: one flag for all
+            else { d.GetIntegerByName("Flip", out i); if (i != 0) { p.Flips = new string('1', 64); p.LegacyFlips = true; } }   // older versions: one flag for all
             string bl; d.GetStringByName("Blend", out bl); p.Blend = bl == "1";   // missing (older features) = off
             string co; d.GetStringByName("Corner", out co); p.Flat = co == "1";
+            string ed; d.GetStringByName("Edges", out ed); p.Edges = ed ?? "";
             return p;
         }
 
         public ChamferParams Clone() { return (ChamferParams)MemberwiseClone(); }
+
+        public static string EncodeEdges(IEnumerable<object> edges)
+        {
+            var c = CultureInfo.InvariantCulture;
+            return string.Join(";", edges.Select(o =>
+            {
+                var e = (IEdge)o;
+                var a = (double[])((IVertex)e.GetStartVertex()).GetPoint();
+                var b = (double[])((IVertex)e.GetEndVertex()).GetPoint();
+                return string.Join(",", a.Take(3).Concat(b.Take(3)).Select(v => v.ToString("R", c)));
+            }));
+        }
+
+        public static List<double[]> DecodeEdges(string s)
+        {
+            var res = new List<double[]>();
+            foreach (var part in (s ?? "").Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var v = part.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                if (v.Length == 6) res.Add(v);
+            }
+            return res;
+        }
     }
 
     // ------------------------------------------------------------------------------------------
@@ -297,7 +326,7 @@ namespace MfgChamfer
                     if (f == null) { Clip = null; return 0; }          // something else copied: let SW handle it
                     if (Command == CmdCut) return 0;
                     Clip = ChamferParams.Read((IMacroFeatureData)f.GetDefinition());
-                    Clip.Flips = "";
+                    Clip.Flips = ""; Clip.Edges = "";
                     return 1;                                           // handled - don't run SW's copy
                 }
                 if (Command == CmdPaste && Clip != null)
@@ -484,6 +513,11 @@ namespace MfgChamfer
             for (int i = 0; i < all.Length; i++)
                 if ((i < mk.Length ? mk[i] : 1) == 1 && all[i] is IEdge) edges.Add((IEdge)all[i]);
             if (edges.Count == 0) throw new Exception("no edges (references missing?)");
+            // Like a native chamfer: an edge that disappeared (e.g. its feature was deleted) is an error, not silently skipped.
+            // Flips holds one flag per edge selected at the last OK, so its length is the expected edge count.
+            if (!p.LegacyFlips && p.Flips.Length > edges.Count)
+                throw new Exception(string.Format("{0} of {1} edges missing (deleted or changed geometry) - edit the feature to reselect",
+                    p.Flips.Length - edges.Count, p.Flips.Length));
 
             IBody2 src = null;
             object eb = data.EditBodies;
@@ -1003,6 +1037,8 @@ namespace MfgChamfer
         public static IFeature Insert(ISldWorks sw, IModelDoc2 model, IList<object> edges, ChamferParams p)
         {
             var body = ((IEdge)edges[0]).GetBody();
+            if (p.Flips.Length < edges.Count) p.Flips = p.Flips.PadRight(edges.Count, '0');   // one flag per edge (= edge count)
+            p.Edges = ChamferParams.EncodeEdges(edges);
             var sm = (ISelectionMgr)model.SelectionManager;
             model.ClearSelection2(true);
             var sd = (SelectData)sm.CreateSelectData();
@@ -1149,19 +1185,122 @@ namespace MfgChamfer
                 var sm = (ISelectionMgr)model.SelectionManager;
                 var all = (objs as object[]) ?? new object[0];
                 var mk = (marks as int[]) ?? new int[0];
-                int k = 0;
+                var got = new List<IEdge>();
                 for (int i = 0; i < all.Length; i++)
                 {
                     var e = all[i] as IEdge;
-                    if (e == null || (i < mk.Length ? mk[i] : 1) != 1) continue;
-                    flips[Key(e)] = p.FlipAt(k++);
-                    var sd = (SelectData)sm.CreateSelectData();
-                    sd.Mark = 1;
-                    ((IEntity)e).Select4(true, sd);
+                    if (e != null && (i < mk.Length ? mk[i] : 1) == 1) got.Add(e);
                 }
+                // Match the edges SOLIDWORKS still finds to the stored ones (by end points, then in order), so the
+                // reverse flags stay with the right edge and the ones that are gone can be shown like native "Missing".
+                var stored = ChamferParams.DecodeEdges(p.Edges);
+                int expected = Math.Max(p.LegacyFlips ? 0 : p.Flips.Length, stored.Count);
+                var used = new bool[Math.Max(expected, got.Count)];
+                var slot = Enumerable.Repeat(-1, got.Count).ToArray();
+                for (int j = 0; j < got.Count; j++)
+                    for (int s = 0; s < stored.Count; s++)
+                        if (!used[s] && SameEdge(got[j], stored[s])) { slot[j] = s; used[s] = true; break; }
+                // Edges that grew or shrank (e.g. the step was deleted and the floor edge now runs the full width): pair
+                // with the stored edge on the same line - parallel, stored midpoint on the edge - closest first.
+                for (int j = 0; j < got.Count; j++)
+                {
+                    if (slot[j] >= 0) continue;
+                    int best = -1; double bestD = 1e-6;
+                    for (int s = 0; s < stored.Count; s++)
+                    {
+                        if (used[s]) continue;
+                        double d = OnSameLine(got[j], stored[s]);
+                        if (d < bestD) { bestD = d; best = s; }
+                    }
+                    if (best >= 0) { slot[j] = best; used[best] = true; }
+                }
+                for (int j = 0; j < got.Count; j++)
+                    if (slot[j] < 0) { int s = Array.IndexOf(used, false); if (s < 0) s = j; slot[j] = s; if (s < used.Length) used[s] = true; }
+                missingCount = Math.Max(0, expected - got.Count);
+                missingNames.Clear(); missing.Clear();
+                for (int s = 0; s < expected; s++)
+                    if (!used[s]) { missingNames.Add("Edge" + (s + 1)); if (s < stored.Count) missing.Add(stored[s]); }
+                loading = true;
+                try
+                {
+                    for (int j = 0; j < got.Count; j++)
+                    {
+                        flips[Key(got[j])] = p.FlipAt(slot[j]);
+                        var sd = (SelectData)sm.CreateSelectData();
+                        sd.Mark = 1;
+                        ((IEntity)got[j]).Select4(true, sd);
+                    }
+                }
+                finally { loading = false; }
             }
             SyncCheckbox();
             UpdatePreview();
+        }
+
+        // Edges of the edited feature that no longer exist: drawn as red dashed lines where they were (like native).
+        readonly List<double[]> missing = new List<double[]>();
+        readonly List<string> missingNames = new List<string>();
+        int missingCount;
+        bool loading;
+
+        static bool SameEdge(IEdge e, double[] s)
+        {
+            var a = (double[])((IVertex)e.GetStartVertex()).GetPoint();
+            var b = (double[])((IVertex)e.GetEndVertex()).GetPoint();
+            Func<double[], int, double> d = (q, o) => Math.Sqrt(Math.Pow(q[0] - s[o], 2) + Math.Pow(q[1] - s[o + 1], 2) + Math.Pow(q[2] - s[o + 2], 2));
+            return (d(a, 0) < 1e-7 && d(b, 3) < 1e-7) || (d(a, 3) < 1e-7 && d(b, 0) < 1e-7);
+        }
+
+        // Distance from the stored segment's midpoint to the edge if both are parallel lines, else infinity
+        static double OnSameLine(IEdge e, double[] s)
+        {
+            try
+            {
+                var a = (double[])((IVertex)e.GetStartVertex()).GetPoint();
+                var b = (double[])((IVertex)e.GetEndVertex()).GetPoint();
+                double[] u = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, w = { s[3] - s[0], s[4] - s[1], s[5] - s[2] };
+                double lu = Math.Sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]), lw = Math.Sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+                if (lu < 1e-9 || lw < 1e-9 || Math.Abs((u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) / (lu * lw)) < 0.9999) return double.MaxValue;
+                var m = new[] { (s[0] + s[3]) / 2, (s[1] + s[4]) / 2, (s[2] + s[5]) / 2 };
+                var q = e.GetClosestPointOn(m[0], m[1], m[2]) as double[];
+                if (q == null) return double.MaxValue;
+                return Math.Sqrt(Math.Pow(q[0] - m[0], 2) + Math.Pow(q[1] - m[1], 2) + Math.Pow(q[2] - m[2], 2));
+            }
+            catch { return double.MaxValue; }
+        }
+
+        string HintNow()
+        {
+            if (missingCount == 0) return Hint;
+            var names = missingNames.Count > 0 ? string.Join(", ", missingNames) : missingCount + " edge(s)";
+            return "Missing: " + names + (missing.Count > 0 ? " (red dashed line)" : "") +
+                   " - its geometry was deleted or changed. Pick a replacement edge, or press OK to continue without it.\n\n" + Hint;
+        }
+
+        void DrawMissing(IModeler modeler)
+        {
+            const int red = 0x0000FF;   // COLORREF (BGR)
+            foreach (var m in missing)
+            {
+                var a = new[] { m[0], m[1], m[2] };
+                var b = new[] { m[3], m[4], m[5] };
+                double len = Engine.Dist(a, b);
+                if (len < 1e-7) continue;
+                // like the native "missing" line: many short dashes with gaps a bit shorter than the dashes
+                int n = Math.Max(8, (int)Math.Round(len / 0.0005));
+                n = Math.Min(n, 60);
+                double period = len / n, dash = period * 0.55;
+                for (double t = 0; t < len - 1e-9; t += period)
+                {
+                    double t1 = Math.Min(len, t + dash);
+                    Func<double, double[]> at = u => new[] { a[0] + (b[0] - a[0]) * u / len, a[1] + (b[1] - a[1]) * u / len, a[2] + (b[2] - a[2]) * u / len };
+                    var wire = modeler.CreateWireBody(new[] { Engine.Segment(modeler, at(t), at(t1)) },
+                        (int)swCreateWireBodyOptions_e.swCreateWireBodyByDefault) as IBody2;
+                    if (wire == null) continue;
+                    wire.Display3(model, red, (int)swTempBodySelectOptions_e.swTempBodySelectOptionNone);
+                    preview.Add(wire);
+                }
+            }
         }
 
         void Message(string text)
@@ -1255,11 +1394,12 @@ namespace MfgChamfer
             if (!shown) return;
             try
             {
+                try { DrawMissing((IModeler)sw.GetModeler()); } catch (Exception ex) { Engine.Log("missing: " + ex.Message); }
                 var cur = p.Clone();
                 var sel = SelectedEdges();
                 problem = null;
                 OkCursor(false);
-                if (sel.Count == 0) { Message(Hint); return; }
+                if (sel.Count == 0) { Message(HintNow()); model.GraphicsRedraw2(); return; }
                 if (cur.ToolDia < 2 * cur.Size - 1e-7)
                 {
                     problem = string.Format(CultureInfo.InvariantCulture,
@@ -1321,7 +1461,7 @@ namespace MfgChamfer
                     preview.Add(wire);
                 }
 
-                Message(Hint);
+                Message(HintNow());
                 OkCursor(true);
                 model.GraphicsRedraw2();
             }
@@ -1385,6 +1525,7 @@ namespace MfgChamfer
             var list = SelectedEdges();
             edges.AddRange(list.Cast<object>());
             p.Flips = new string(list.Select(e => FlipOf(e) ? '1' : '0').ToArray());
+            p.Edges = ChamferParams.EncodeEdges(list.Cast<object>());
         }
 
         public void AfterClose()
@@ -1470,7 +1611,11 @@ namespace MfgChamfer
         public void OnComboboxSelectionChanged(int Id, int Item) { }
         public void OnListboxSelectionChanged(int Id, int Item) { }
         public void OnSelectionboxFocusChanged(int Id) { SyncCheckbox(); }
-        public void OnSelectionboxListChanged(int Id, int Count) { UpdatePreview(); SyncCheckbox(); }
+        public void OnSelectionboxListChanged(int Id, int Count)
+        {
+            if (!loading && missingCount > 0) { missingCount = 0; missing.Clear(); missingNames.Clear(); }
+            UpdatePreview(); SyncCheckbox();
+        }
         public void OnSelectionboxCalloutCreated(int Id) { }
         public void OnSelectionboxCalloutDestroyed(int Id) { }
         public bool OnSubmitSelection(int Id, object Selection, int SelType, ref string ItemText)
