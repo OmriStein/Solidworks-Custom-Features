@@ -17,7 +17,7 @@ using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidWorks.Interop.swpublished;
 
-[assembly: System.Reflection.AssemblyTitle("CNC Chamfer")]
+[assembly: System.Reflection.AssemblyTitle("Custom-Features")]
 [assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
 
 namespace MfgChamfer
@@ -95,7 +95,8 @@ namespace MfgChamfer
     [ComVisible(true), Guid("35EB7F02-FCBB-4389-918E-1CF435CB89A1"), ProgId("MfgChamfer.Addin")]
     public class Addin : ISwAddin
     {
-        public const string Title = "CNC Chamfer";
+        public const string Title = "CNC Chamfer";          // the feature / command
+        const string AddinTitle = "Custom-Features";        // name in Tools > Add-Ins (DLL and ProgIds keep "MfgChamfer" for existing parts)
         const int GroupId = 52711;
         public static ISldWorks Sw;
         public static ChamferParams Last = new ChamferParams();
@@ -361,8 +362,8 @@ namespace MfgChamfer
             using (k)
             {
                 k.SetValue(null, 0, RegistryValueKind.DWord);
-                k.SetValue("Title", Title);
-                k.SetValue("Description", "Chamfers for CNC: stop before walls and end with the runout a chamfer mill leaves");
+                k.SetValue("Title", AddinTitle);
+                k.SetValue("Description", "Custom features for SOLIDWORKS (Insert > Custom-Features): CNC Chamfer");
                 k.SetValue("Icon Path", Path.Combine(asmDir, @"icons\addin_16.png"));
             }
             using (var s = Registry.CurrentUser.CreateSubKey(@"Software\SolidWorks\AddInsStartup\" + id))
@@ -690,7 +691,7 @@ namespace MfgChamfer
 
         public static void Log(string m)
         {
-            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "MfgChamfer.log"), DateTime.Now.ToString("HH:mm:ss ") + m + System.Environment.NewLine); } catch { }
+            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "CustomFeatures.log"), DateTime.Now.ToString("HH:mm:ss ") + m + System.Environment.NewLine); } catch { }
         }
 
         public static IBody2 Largest(object[] res)

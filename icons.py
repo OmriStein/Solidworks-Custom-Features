@@ -1,4 +1,4 @@
-"""Generate SolidWorks-style icons for the Mfg Chamfer add-in.
+"""Generate SolidWorks-style icons for the Custom-Features add-in.
 
 Isometric stepped block (gray), yellow chamfer along the front top edge that stops
 short of the wall with a conical tool runout, plus a small blue chamfer mill.
