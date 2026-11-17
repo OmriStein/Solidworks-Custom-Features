@@ -32,15 +32,17 @@ namespace MfgChamfer
         public double Clearance = 0.0005;  // extra gap between tool and wall
         public string Flips = "";          // per edge, in selection order: '1' = machine from the other face
         public bool Blend = true;          // blend two perpendicular chamfers around an inside corner (old features: off)
+        public bool Flat = false;          // flat triangle where three chamfers meet at an outside corner (like native Chamfer)
 
         public bool FlipAt(int i) { return i < Flips.Length && Flips[i] == '1'; }
 
-        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend" };
+        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner" };
         public static readonly int[] Types =
         {
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString
         };
@@ -48,7 +50,7 @@ namespace MfgChamfer
         public string[] Values()
         {
             var c = CultureInfo.InvariantCulture;
-            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0" };
+            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0" };
         }
 
         // Replaces the whole parameter set (also upgrades features made with older versions)
@@ -56,15 +58,17 @@ namespace MfgChamfer
         {
             // Set by name (SetParameters alone was not picked up by ModifyDefinition).
             // Features from older versions have no "Flips" parameter yet: then redefine the whole set.
-            string probe, probe2;
+            string probe, probe2, probe3;
             d.GetStringByName("Flips", out probe);
             d.GetStringByName("Blend", out probe2);
-            if (probe == null || probe2 == null) d.SetParameters(Names, Types, Values());
+            d.GetStringByName("Corner", out probe3);
+            if (probe == null || probe2 == null || probe3 == null) d.SetParameters(Names, Types, Values());
             d.SetDoubleByName("Size", Size);
             d.SetDoubleByName("ToolDia", ToolDia);
             d.SetDoubleByName("Clearance", Clearance);
             d.SetStringByName("Flips", Flips ?? "");
             d.SetStringByName("Blend", Blend ? "1" : "0");
+            d.SetStringByName("Corner", Flat ? "1" : "0");
         }
 
         public static ChamferParams Read(IMacroFeatureData d)
@@ -78,6 +82,7 @@ namespace MfgChamfer
             if (!string.IsNullOrEmpty(f)) p.Flips = f;
             else { d.GetIntegerByName("Flip", out i); if (i != 0) p.Flips = new string('1', 64); }   // older versions: one flag for all
             string bl; d.GetStringByName("Blend", out bl); p.Blend = bl == "1";   // missing (older features) = off
+            string co; d.GetStringByName("Corner", out co); p.Flat = co == "1";
             return p;
         }
 
@@ -500,7 +505,7 @@ namespace MfgChamfer
 
             // Plan every edge on the untouched body first (edges stay valid), then cut.
             var plans = new List<EdgeCut>();
-            var blends = FindBlends(edges, p.Blend);
+            var blends = FindBlends(edges, p.Blend, p.Flat);
             for (int i = 0; i < edges.Count; i++)
             {
                 try { plans.Add(PlanEdge(edges[i], p, p.FlipAt(i), blends[i], modeler, math, null)); }
@@ -550,9 +555,10 @@ namespace MfgChamfer
             public bool[] End = new bool[2];                     // start / end vertex is a blended corner
             public double[] Axis;                                // tool axis (into the material) forced by the shared face
             public List<Corner> Corners = new List<Corner>();    // corner cones owned by this edge
+            public List<double[][]> Flats = new List<double[][]>(); // flat outside corners owned by this edge: {V, n1, n2, n3}
         }
 
-        public static BlendInfo[] FindBlends(IList<IEdge> edges, bool enabled)
+        public static BlendInfo[] FindBlends(IList<IEdge> edges, bool enabled, bool flat = false)
         {
             var res = edges.Select(e => new BlendInfo()).ToArray();
             for (int i = 0; i < edges.Count; i++)
@@ -589,7 +595,58 @@ namespace MfgChamfer
                     }
                     catch { }
                 }
+            if (flat) FindFlatCorners(edges, res);
             return res;
+        }
+
+        // Flat corner (native Chamfer style): three selected, mutually perpendicular edges meeting at an outside
+        // corner V. The three chamfers alone meet in a point; this adds a cut by the plane through the three points
+        // where the chamfer lines meet on each face: (p - V)·(n1 + n2 + n3) = -2d.
+        static void FindFlatCorners(IList<IEdge> edges, BlendInfo[] res)
+        {
+            var ends = new List<Tuple<int, int, double[]>>();
+            for (int i = 0; i < edges.Count; i++)
+            {
+                try
+                {
+                    if (!((ICurve)edges[i].GetCurve()).IsLine()) continue;
+                    ends.Add(Tuple.Create(i, 0, (double[])((IVertex)edges[i].GetStartVertex()).GetPoint()));
+                    ends.Add(Tuple.Create(i, 1, (double[])((IVertex)edges[i].GetEndVertex()).GetPoint()));
+                }
+                catch { }
+            }
+            var done = new List<double[]>();
+            foreach (var e0 in ends)
+            {
+                try
+                {
+                    var V = e0.Item3;
+                    if (done.Any(q => Dist(q, V) < 1e-8)) continue;
+                    done.Add(V);
+                    var at = ends.Where(e => Dist(e.Item3, V) < 1e-8).ToList();
+                    if (at.Count != 3 || at.Select(e => e.Item1).Distinct().Count() != 3) continue;
+                    if (at.Any(e => res[e.Item1].End[e.Item2])) continue;           // blended there
+                    var t = at.Select(e =>
+                    {
+                        var ed = edges[e.Item1];
+                        var other = (double[])((IVertex)(e.Item2 == 0 ? ed.GetEndVertex() : ed.GetStartVertex())).GetPoint();
+                        return Norm(Sub(other, V));
+                    }).ToArray();
+                    if (Math.Abs(Dot(t[0], t[1])) > 0.02 || Math.Abs(Dot(t[0], t[2])) > 0.02 || Math.Abs(Dot(t[1], t[2])) > 0.02) continue;
+                    var faces = new List<IFace2>();
+                    foreach (var e in at)
+                        foreach (IFace2 f in (object[])edges[e.Item1].GetTwoAdjacentFaces2())
+                            if (!faces.Any(g => g.IsSame(f))) faces.Add(f);
+                    if (faces.Count != 3) continue;
+                    var n = faces.Select(PlaneNormal).ToArray();
+                    // outside corner: each edge runs away from V against the normal of the face it does not touch
+                    bool convex = t.All(tk => n.Any(nk => Dot(tk, nk) < -0.98));
+                    if (!convex) continue;
+                    int owner = at.Min(e => e.Item1);
+                    res[owner].Flats.Add(new[] { V, n[0], n[1], n[2] });
+                }
+                catch { }
+            }
         }
 
         public static IBody2 ApplyCut(IBody2 body, EdgeCut c)
@@ -706,6 +763,7 @@ namespace MfgChamfer
                 // shave material the end meets at an angle (e.g. an existing chamfer) - a real run-off, not a wall.
                 int open = (b0 || blend.End[0] ? 0 : 1) + (b1 || blend.End[1] ? 0 : 1);
                 expected[0] += open * d * d / 2 * ext;
+                expected[0] += blend.Flats.Count * d * d * d / 3;   // corner tetrahedron V-T1-T2-T3
                 // A corner cone removes two quarter-cones of material beyond this edge's own prism: the inside-corner
                 // quadrant and the quadrant along the partner edge (cut before the partner's prism, so it counts here).
             }
@@ -720,7 +778,23 @@ namespace MfgChamfer
             if (b0) list.Add(Cone(Add(p0, Scale(t, s0)), axis, p.Size, stop, modeler));
             if (b1) list.Add(Cone(Add(p0, Scale(t, s1)), axis, p.Size, stop, modeler));
             foreach (var c in blend.Corners) list.Add(Cone(c.V, axis, p.Size, 10 * p.Size, modeler));
+            foreach (var f in blend.Flats) list.Add(FlatCornerTool(f[0], f[1], f[2], f[3], p.Size, modeler, math));
             return list;
+        }
+
+        // Triangle T1 T2 T3 (where the chamfer lines meet on each face) swept outwards past the corner.
+        static IBody2 FlatCornerTool(double[] V, double[] n1, double[] n2, double[] n3, double d, IModeler modeler, IMathUtility math)
+        {
+            var a = Sub(V, Scale(Add(n2, n3), d));
+            var b = Sub(V, Scale(Add(n1, n3), d));
+            var c = Sub(V, Scale(Add(n1, n2), d));
+            var s = Norm(Add(Add(n1, n2), n3));
+            var surf = (ISurface)modeler.CreatePlanarSurface2(a, s, Norm(Sub(b, a)));
+            var sheet = surf.CreateTrimmedSheet4(new[] { Seg(modeler, a, b), Seg(modeler, b, c), Seg(modeler, c, a) }, true) as IBody2;
+            if (sheet == null) throw new Exception("could not build flat corner");
+            var body = modeler.CreateExtrudedBody((Body2)sheet, (MathVector)math.CreateVector(s), 2 * d);
+            if (body == null) throw new Exception("could not build flat corner");
+            return body;
         }
 
         // Preview of a blended corner: the radius-d arc on the shared face and generator lines to the cone apex.
@@ -982,7 +1056,7 @@ namespace MfgChamfer
     [ComVisible(true)]
     public class ChamferPage : IPropertyManagerPage2Handler9
     {
-        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdMenuReverse = 30;
+        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdMenuReverse = 30;
         const string FlipCaption = "Reverse direction";
         readonly ISldWorks sw;
         readonly IModelDoc2 model;
@@ -992,7 +1066,7 @@ namespace MfgChamfer
         IPropertyManagerPage2 page;
         IPropertyManagerPageSelectionbox sel;
         IPropertyManagerPageNumberbox numSize, numDia, numClr;
-        IPropertyManagerPageCheckbox chkFlip, chkBlend;
+        IPropertyManagerPageCheckbox chkFlip, chkBlend, chkFlat;
         bool ok;
         List<object> edges = new List<object>();
         readonly List<IBody2> preview = new List<IBody2>();
@@ -1051,6 +1125,11 @@ namespace MfgChamfer
                 "are chamfered as one tool path from that side face: the chamfer turns around the corner with radius = chamfer distance " +
                 "instead of stopping before the wall.");
             chkBlend.Checked = p.Blend;
+            chkFlat = (IPropertyManagerPageCheckbox)g2.AddControl2(IdFlat,
+                (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, "Flat corner where 3 chamfers meet", left, cOpts,
+                "Where three selected edges meet at an outside corner, finish it with a small flat triangle like the native Chamfer " +
+                "(needs a 3D move on the machine). Off: the three chamfers meet in a point, as a chamfer mill tracing the edges leaves it.");
+            chkFlat.Checked = p.Flat;
 
             var g3 = (IPropertyManagerPageGroup)page.AddGroupBox(3, "Chamfer Mill", gOpts);
             numDia = Number(g3, IdDia, "Tool diameter", p.ToolDia, 0.0001, 1, swControlBitmapLabelType_e.swBitmapLabel_Diameter, cOpts, indent, left);
@@ -1196,7 +1275,7 @@ namespace MfgChamfer
                 var result = (IBody2)orig.Copy();
                 var lines = new List<double[][]>();
                 var plans = new List<Engine.EdgeCut>();
-                var blends = Engine.FindBlends(sel, cur.Blend);
+                var blends = Engine.FindBlends(sel, cur.Blend, cur.Flat);
                 for (int k = 0; k < sel.Count; k++)
                 {
                     try { plans.Add(Engine.PlanEdge(sel[k], cur, FlipOf(sel[k]), blends[k], modeler, math, lines)); }
@@ -1374,6 +1453,7 @@ namespace MfgChamfer
         {
             if (Id == IdFlip && !syncing) ToggleCurrent(null);
             else if (Id == IdBlend) { p.Blend = Checked; UpdatePreview(); }
+            else if (Id == IdFlat) { p.Flat = Checked; UpdatePreview(); }
         }
         public void OnOptionCheck(int Id) { }
         public void OnButtonPress(int Id) { }
