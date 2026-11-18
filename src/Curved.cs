@@ -48,6 +48,47 @@ namespace MfgChamfer
                 }
         }
 
+        // Edges that continue start tangentially through shared vertices (lines and arcs), the whole chain, not start itself
+        public static List<IEdge> TangentChain(IEdge start)
+        {
+            var chain = new List<IEdge> { start };
+            for (int i = 0; i < chain.Count && chain.Count < 200; i++)
+            {
+                var cur = chain[i];
+                foreach (var v in new[] { cur.GetStartVertex() as IVertex, cur.GetEndVertex() as IVertex })
+                {
+                    if (v == null) continue;
+                    try
+                    {
+                        var pt = (double[])v.GetPoint();
+                        var tc = TangentAt(cur, pt);
+                        if (tc == null) continue;
+                        foreach (IEdge n in (object[])v.GetEdges())
+                        {
+                            if (chain.Any(x => SameEdge(x, n))) continue;
+                            var tn = TangentAt(n, pt);
+                            if (tn == null || Math.Abs(Dot(tc, tn)) < 0.9999 || !SharesFace(cur, n)) continue;
+                            chain.Add(n);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            chain.RemoveAt(0);
+            return chain;
+        }
+
+        // Same edge: same end points and same kind of curve (an arc and its complement differ in radius/line-ness)
+        static bool SameEdge(IEdge a, IEdge b)
+        {
+            var ea = Ends(a); var eb = Ends(b);
+            bool ends = (Dist(ea[0], eb[0]) < 1e-8 && Dist(ea[1], eb[1]) < 1e-8) || (Dist(ea[0], eb[1]) < 1e-8 && Dist(ea[1], eb[0]) < 1e-8);
+            if (!ends) return false;
+            var ca = (ICurve)a.GetCurve(); var cb = (ICurve)b.GetCurve();
+            if (ca.IsLine() != cb.IsLine()) return false;
+            return ca.IsLine() || Math.Abs(((double[])ca.CircleParams)[6] - ((double[])cb.CircleParams)[6]) < 1e-8;
+        }
+
         static double[] TangentAt(IEdge e, double[] V)
         {
             var c = (ICurve)e.GetCurve();
@@ -193,6 +234,21 @@ namespace MfgChamfer
                     var od = k == 0 ? Scale(tv, -1) : tv;           // away from the arc
                     var nv = FaceNormalAt(fq, vtx);
                     var wn = nv == null ? null : Blocker((IVertex)(k == 0 ? edge.GetStartVertex() : edge.GetEndVertex()), od, nP, nv);
+                    if (wn == null)
+                    {
+                        // Tangent run-on into an unselected face (e.g. arc into a flat wall): finish like a blocked end,
+                        // as if a wall stood square to the arc at the vertex
+                        try
+                        {
+                            foreach (IFace2 tf in (object[])((IVertex)(k == 0 ? edge.GetStartVertex() : edge.GetEndVertex())).GetAdjacentFaces())
+                            {
+                                if (Math.Abs(tf.GetArea() - fq.GetArea()) < 1e-12) continue;   // the arc's own face (same area)
+                                var tn = FaceNormalAt(tf, vtx);
+                                if (tn != null && Dot(tn, nv) > 0.999 && Math.Abs(Dot(tn, nP)) < 0.01) { wn = Scale(od, -1); break; }
+                            }
+                        }
+                        catch { }
+                    }
                     if (wn == null) continue;
                     int kk = k;
                     Func<double, double> D = u => Dot(Sub(bAt(dir * (kk == 0 ? u : span - u)), vtx), wn);   // clearance of the mill axis from the wall after walking u inwards

@@ -34,13 +34,14 @@ namespace MfgChamfer
         public bool LegacyFlips;           // very old feature: one flag for all edges, no per-edge count
         public string Edges = "";          // end points of each edge at the last OK (m): "x0,y0,z0,x1,y1,z1;..." - to show missing ones
         public bool Blend = true;          // blend two perpendicular chamfers around an inside corner (old features: off)
+        public bool Tangent;               // tangent propagation: the edges continuing the selected ones tangentially are chamfered too (not selected)
         public bool Flat = false;          // flat triangle where three chamfers meet at an outside corner (like native Chamfer)
         public double Angle = Math.PI / 4; // chamfer angle from the face the mill comes from (rad); a 3-axis mill then has 180 deg - 2 x this
         
 
         public bool FlipAt(int i) { return i < Flips.Length && Flips[i] == '1'; }
 
-        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner", "Edges", "Angle" };
+        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner", "Edges", "Angle", "Tangent" };
         public static readonly int[] Types =
         {
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
@@ -50,13 +51,14 @@ namespace MfgChamfer
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
-            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString
         };
 
         public string[] Values()
         {
             var c = CultureInfo.InvariantCulture;
-            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0", Edges ?? "", Angle.ToString("R", c) };
+            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0", Edges ?? "", Angle.ToString("R", c), Tangent ? "1" : "0" };
         }
 
         // Replaces the whole parameter set (also upgrades features made with older versions)
@@ -64,13 +66,14 @@ namespace MfgChamfer
         {
             // Set by name (SetParameters alone was not picked up by ModifyDefinition).
             // Features from older versions have no "Flips" parameter yet: then redefine the whole set.
-            string probe, probe2, probe3, probe4;
+            string probe, probe2, probe3, probe4, probe5;
             d.GetStringByName("Flips", out probe);
             d.GetStringByName("Blend", out probe2);
             d.GetStringByName("Corner", out probe3);
             d.GetStringByName("Edges", out probe4);
+            d.GetStringByName("Tangent", out probe5);
             double probeA; d.GetDoubleByName("Angle", out probeA);
-            if (probe == null || probe2 == null || probe3 == null || probe4 == null || probeA <= 0) d.SetParameters(Names, Types, Values());
+            if (probe == null || probe2 == null || probe3 == null || probe4 == null || probe5 == null || probeA <= 0) d.SetParameters(Names, Types, Values());
             d.SetDoubleByName("Size", Size);
             d.SetDoubleByName("ToolDia", ToolDia);
             d.SetDoubleByName("Clearance", Clearance);
@@ -79,6 +82,7 @@ namespace MfgChamfer
             d.SetStringByName("Corner", Flat ? "1" : "0");
             d.SetStringByName("Edges", Edges ?? "");
             d.SetDoubleByName("Angle", Angle);
+            d.SetStringByName("Tangent", Tangent ? "1" : "0");
         }
 
         public static ChamferParams Read(IMacroFeatureData d)
@@ -94,6 +98,7 @@ namespace MfgChamfer
             string bl; d.GetStringByName("Blend", out bl); p.Blend = bl == "1";   // missing (older features) = off
             string co; d.GetStringByName("Corner", out co); p.Flat = co == "1";
             string ed; d.GetStringByName("Edges", out ed); p.Edges = ed ?? "";
+            string tg; d.GetStringByName("Tangent", out tg); p.Tangent = tg == "1";
             d.GetDoubleByName("Angle", out v); if (v > 0.01 && v < 1.56) p.Angle = v;   // missing (older features) = 45 deg
             return p;
         }
@@ -539,12 +544,13 @@ namespace MfgChamfer
             var modeler = (IModeler)sw.GetModeler();
             var math = (IMathUtility)sw.GetMathUtility();
 
+            int[] srcI; edges = Expand(edges, p, out srcI);   // tangent propagation: unselected tangent neighbours join in
             // Plan every edge on the untouched body first (edges stay valid), then cut.
             var plans = new List<EdgeCut>();
-            var blends = FindBlends(edges, p, p.Blend, p.Flat, i => p.FlipAt(i));
+            var blends = FindBlends(edges, p, p.Blend, p.Flat, i => p.FlipAt(srcI[i]));
             for (int i = 0; i < edges.Count; i++)
             {
-                try { plans.Add(PlanEdge(edges[i], p, p.FlipAt(i), blends[i], modeler, math, null)); }
+                try { plans.Add(PlanEdge(edges[i], p, p.FlipAt(srcI[i]), blends[i], modeler, math, null)); }
                 catch (Exception ex) { throw new Exception("edge " + (i + 1) + ": " + ex.Message); }
             }
             for (int i = 0; i < plans.Count; i++)
@@ -567,6 +573,18 @@ namespace MfgChamfer
             id = 0;
             foreach (var e in (edgesNeed as object[]) ?? new object[0]) data.SetEdgeUserId((Edge)e, id++, 0);
             return work;
+        }
+
+        // The selected edges plus, with tangent propagation, the edges that continue them tangentially; src[i] = the selected edge each one follows
+        public static List<IEdge> Expand(List<IEdge> sel, ChamferParams p, out int[] src)
+        {
+            var all = new List<IEdge>(sel); var s = Enumerable.Range(0, sel.Count).ToList();
+            if (p.Tangent)
+                for (int i = 0; i < sel.Count; i++)
+                    foreach (var n in TangentChain(sel[i]))
+                        if (!all.Any(x => SameEdge(x, n))) { all.Add(n); s.Add(i); }
+            src = s.ToArray();
+            return all;
         }
 
         // Cut one edge's chamfer from body. Refuses if more material is removed than the chamfer and its runout
@@ -1285,7 +1303,7 @@ namespace MfgChamfer
     [ComVisible(true)]
     public class ChamferPage : IPropertyManagerPage2Handler9
     {
-        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdAngle = 26, IdMenuReverse = 30;
+        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdAngle = 26, IdTangent = 27, IdMenuReverse = 30;
         const string FlipCaption = "Reverse direction";
         readonly ISldWorks sw;
         readonly IModelDoc2 model;
@@ -1295,7 +1313,7 @@ namespace MfgChamfer
         IPropertyManagerPage2 page;
         IPropertyManagerPageSelectionbox sel;
         IPropertyManagerPageNumberbox numSize, numAngle, numDia, numClr;
-        IPropertyManagerPageCheckbox chkBlend, chkFlat;
+        IPropertyManagerPageCheckbox chkBlend, chkFlat, chkTangent;
         bool ok;
         List<object> edges = new List<object>();
         readonly List<IBody2> preview = new List<IBody2>();
@@ -1356,6 +1374,10 @@ namespace MfgChamfer
             keep.Add(flipBtn);   // a control whose wrapper is collected stops responding (the button vanished)
 
             var g2 = (IPropertyManagerPageGroup)page.AddGroupBox(2, "Chamfer Parameters", gOpts); keep.Add(g2);
+            chkTangent = (IPropertyManagerPageCheckbox)g2.AddControl2(IdTangent,
+                (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, "Tangent propagation", left, cOpts,
+                "Like the native tools: the edges that continue the selected edges tangentially (a pocket outline of lines and arcs, the rim of a slot) are chamfered too, without being selected.");
+            chkTangent.Checked = p.Tangent;
             numSize = Number(g2, IdSize, "Chamfer distance (on the mill's face)", p.Size, 0.00001, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance, cOpts, indent, left);
             numAngle = Number(g2, IdAngle, "Chamfer angle (from the mill's face)", p.Angle, 0.0174533, 1.5533, swControlBitmapLabelType_e.swBitmapLabel_AngularDistance, cOpts, indent, left,
                               swNumberboxUnitType_e.swNumberBox_Angle);
@@ -1598,10 +1620,11 @@ namespace MfgChamfer
                 var result = (IBody2)orig.Copy();
                 var lines = new List<double[][]>();
                 var plans = new List<Engine.EdgeCut>();
-                var blends = Engine.FindBlends(sel, cur, cur.Blend, cur.Flat, k => FlipOf(sel[k]));
-                for (int k = 0; k < sel.Count; k++)
+                int[] srcI; var all = Engine.Expand(sel, cur, out srcI);
+                var blends = Engine.FindBlends(all, cur, cur.Blend, cur.Flat, k => FlipOf(sel[srcI[k]]));
+                for (int k = 0; k < all.Count; k++)
                 {
-                    try { plans.Add(Engine.PlanEdge(sel[k], cur, FlipOf(sel[k]), blends[k], modeler, math, lines)); }
+                    try { plans.Add(Engine.PlanEdge(all[k], cur, FlipOf(sel[srcI[k]]), blends[k], modeler, math, lines)); }
                     catch (Exception ex) { errors.Add("Edge " + (k + 1) + ": " + ex.Message); plans.Add(null); }
                 }
                 for (int k = 0; k < plans.Count; k++)
@@ -1779,6 +1802,7 @@ namespace MfgChamfer
         {
             if (Id == IdBlend) { p.Blend = Checked; UpdatePreview(); }
             else if (Id == IdFlat) { p.Flat = Checked; UpdatePreview(); }
+            else if (Id == IdTangent) { p.Tangent = Checked; UpdatePreview(); }
         }
         public void OnOptionCheck(int Id) { }
         public void OnButtonPress(int Id) { if (Id == IdFlip) ToggleCurrent(null); }
