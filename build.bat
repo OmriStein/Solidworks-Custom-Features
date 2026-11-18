@@ -17,6 +17,6 @@ copy /y "%SW%\SolidWorks.Interop.swconst.dll" out >nul
 "%CSC%" /nologo /target:library /platform:x64 /optimize+ /nostdlib+ /out:out\%NAME%.dll ^
   /r:"%FW%\mscorlib.dll" /r:"%FW%\System.dll" /r:"%FW%\System.Core.dll" /r:"%FW%\System.Windows.Forms.dll" /r:"%FW%\System.Drawing.dll" ^
   /r:out\SolidWorks.Interop.sldworks.dll /r:out\SolidWorks.Interop.swpublished.dll /r:out\SolidWorks.Interop.swconst.dll ^
-  src\CustomFeatures.cs
+  src\*.cs
 if errorlevel 1 (echo BUILD FAILED & exit /b 1)
 echo Built out\%NAME%.dll

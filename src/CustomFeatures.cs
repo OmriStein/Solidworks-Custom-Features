@@ -35,10 +35,12 @@ namespace MfgChamfer
         public string Edges = "";          // end points of each edge at the last OK (m): "x0,y0,z0,x1,y1,z1;..." - to show missing ones
         public bool Blend = true;          // blend two perpendicular chamfers around an inside corner (old features: off)
         public bool Flat = false;          // flat triangle where three chamfers meet at an outside corner (like native Chamfer)
+        public double Angle = Math.PI / 4; // chamfer angle from the face the mill comes from (rad); a 3-axis mill then has 180 deg - 2 x this
+        
 
         public bool FlipAt(int i) { return i < Flips.Length && Flips[i] == '1'; }
 
-        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner", "Edges" };
+        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner", "Edges", "Angle" };
         public static readonly int[] Types =
         {
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
@@ -47,13 +49,14 @@ namespace MfgChamfer
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
-            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble
         };
 
         public string[] Values()
         {
             var c = CultureInfo.InvariantCulture;
-            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0", Edges ?? "" };
+            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0", Edges ?? "", Angle.ToString("R", c) };
         }
 
         // Replaces the whole parameter set (also upgrades features made with older versions)
@@ -66,7 +69,8 @@ namespace MfgChamfer
             d.GetStringByName("Blend", out probe2);
             d.GetStringByName("Corner", out probe3);
             d.GetStringByName("Edges", out probe4);
-            if (probe == null || probe2 == null || probe3 == null || probe4 == null) d.SetParameters(Names, Types, Values());
+            double probeA; d.GetDoubleByName("Angle", out probeA);
+            if (probe == null || probe2 == null || probe3 == null || probe4 == null || probeA <= 0) d.SetParameters(Names, Types, Values());
             d.SetDoubleByName("Size", Size);
             d.SetDoubleByName("ToolDia", ToolDia);
             d.SetDoubleByName("Clearance", Clearance);
@@ -74,6 +78,7 @@ namespace MfgChamfer
             d.SetStringByName("Blend", Blend ? "1" : "0");
             d.SetStringByName("Corner", Flat ? "1" : "0");
             d.SetStringByName("Edges", Edges ?? "");
+            d.SetDoubleByName("Angle", Angle);
         }
 
         public static ChamferParams Read(IMacroFeatureData d)
@@ -89,6 +94,7 @@ namespace MfgChamfer
             string bl; d.GetStringByName("Blend", out bl); p.Blend = bl == "1";   // missing (older features) = off
             string co; d.GetStringByName("Corner", out co); p.Flat = co == "1";
             string ed; d.GetStringByName("Edges", out ed); p.Edges = ed ?? "";
+            d.GetDoubleByName("Angle", out v); if (v > 0.01 && v < 1.56) p.Angle = v;   // missing (older features) = 45 deg
             return p;
         }
 
@@ -99,10 +105,8 @@ namespace MfgChamfer
             var c = CultureInfo.InvariantCulture;
             return string.Join(";", edges.Select(o =>
             {
-                var e = (IEdge)o;
-                var a = (double[])((IVertex)e.GetStartVertex()).GetPoint();
-                var b = (double[])((IVertex)e.GetEndVertex()).GetPoint();
-                return string.Join(",", a.Take(3).Concat(b.Take(3)).Select(v => v.ToString("R", c)));
+                var ab = Engine.Ends((IEdge)o);
+                return string.Join(",", ab[0].Take(3).Concat(ab[1].Take(3)).Select(v => v.ToString("R", c)));
             }));
         }
 
@@ -493,7 +497,7 @@ namespace MfgChamfer
     // ------------------------------------------------------------------------------------------
     // Geometry
     // ------------------------------------------------------------------------------------------
-    public static class Engine
+    public static partial class Engine
     {
         const double Tol = 1e-7;
 
@@ -501,9 +505,6 @@ namespace MfgChamfer
         {
             var data = (IMacroFeatureData)feat.GetDefinition();
             var p = ChamferParams.Read(data);
-            if (p.ToolDia < 2 * p.Size - Tol)
-                throw new Exception(string.Format(CultureInfo.InvariantCulture,
-                    "tool diameter must be at least 2 x chamfer size ({0:0.###} mm)", 2 * p.Size * 1000));
 
             object objs, types, marks, views, comps;
             data.GetSelections3(out objs, out types, out marks, out views, out comps);
@@ -540,7 +541,7 @@ namespace MfgChamfer
 
             // Plan every edge on the untouched body first (edges stay valid), then cut.
             var plans = new List<EdgeCut>();
-            var blends = FindBlends(edges, p.Blend, p.Flat);
+            var blends = FindBlends(edges, p, p.Blend, p.Flat, i => p.FlipAt(i));
             for (int i = 0; i < edges.Count; i++)
             {
                 try { plans.Add(PlanEdge(edges[i], p, p.FlipAt(i), blends[i], modeler, math, null)); }
@@ -570,30 +571,33 @@ namespace MfgChamfer
 
         // Cut one edge's chamfer from body. Refuses if more material is removed than the chamfer and its runout
         // can account for - i.e. the tool would cut into a wall or other neighbouring geometry.
-        public class EdgeCut { public List<IBody2> Tools; public double Expected; }
+        public class EdgeCut { public List<IBody2> Tools; public double Expected; public double[] Normal, Dir; }   // Normal/Dir: chamfer plane normal and edge direction (preview hatch)
 
         public static EdgeCut PlanEdge(IEdge edge, ChamferParams p, bool flip, BlendInfo blend, IModeler modeler, IMathUtility math,
                                        List<double[][]> lines)
         {
             var expected = new double[1];
-            var tools = Tools(edge, p, modeler, math, flip, lines, expected, blend).ToList();
-            return new EdgeCut { Tools = tools, Expected = expected[0] };
+            var cut = new EdgeCut();
+            cut.Tools = Tools(edge, p, modeler, math, flip, lines, expected, blend, cut).ToList();
+            cut.Expected = expected[0];
+            return cut;
         }
 
         // Blend: two selected perpendicular edges that meet at a vertex, share a face C, and whose other faces
         // block each other (inside corner on C, e.g. a step wall meeting the floor). The chamfer mill comes in
         // normal to C and turns around the corner: both chamfers run right up to the vertex and a full cone there
         // (axis normal to C, apex at chamfer depth) rounds the chamfer line on C with radius = chamfer size.
-        public class Corner { public double[] V, DirA, DirB; }   // DirA/DirB: from V into the material, along each edge's line
+        public class Corner { public double[] V, DirA, DirB; public double Gamma { get { return Math.Acos(Math.Max(-1, Math.Min(1, Dot(DirA, DirB)))); } } }   // Gamma: angle between the two edges   // DirA/DirB: from V into the material, along each edge's line
         public class BlendInfo
         {
             public bool[] End = new bool[2];                     // start / end vertex is a blended corner
+            public bool[] Join = new bool[2];                    // start / end vertex continues tangentially into another selected edge
             public double[] Axis;                                // tool axis (into the material) forced by the shared face
             public List<Corner> Corners = new List<Corner>();    // corner cones owned by this edge
             public List<double[][]> Flats = new List<double[][]>(); // flat outside corners owned by this edge: {V, n1, n2, n3}
         }
 
-        public static BlendInfo[] FindBlends(IList<IEdge> edges, bool enabled, bool flat = false)
+        public static BlendInfo[] FindBlends(IList<IEdge> edges, ChamferParams p, bool enabled, bool flat, Func<int, bool> flipAt)
         {
             var res = edges.Select(e => new BlendInfo()).ToArray();
             for (int i = 0; i < edges.Count; i++)
@@ -602,42 +606,70 @@ namespace MfgChamfer
                     try
                     {
                         IEdge ei = edges[i], ej = edges[j];
-                        if (!((ICurve)ei.GetCurve()).IsLine() || !((ICurve)ej.GetCurve()).IsLine()) continue;
-                        var pi = new[] { (double[])((IVertex)ei.GetStartVertex()).GetPoint(), (double[])((IVertex)ei.GetEndVertex()).GetPoint() };
-                        var pj = new[] { (double[])((IVertex)ej.GetStartVertex()).GetPoint(), (double[])((IVertex)ej.GetEndVertex()).GetPoint() };
+                        bool li = ((ICurve)ei.GetCurve()).IsLine(), lj = ((ICurve)ej.GetCurve()).IsLine();   // an arc may take the place of a line
+                        if ((!li && !((ICurve)ei.GetCurve()).IsCircle()) || (!lj && !((ICurve)ej.GetCurve()).IsCircle()) || (!li && !lj)) continue;
+                        var pi = Ends(ei);
+                        var pj = Ends(ej);
                         int ai = -1, aj = -1;
                         for (int a = 0; a < 2; a++) for (int b = 0; b < 2; b++) if (Dist(pi[a], pj[b]) < 1e-8) { ai = a; aj = b; }
                         if (ai < 0) continue;
                         var V = pi[ai];
-                        var ti = Norm(Sub(pi[1 - ai], V));                 // away from V along edge i
-                        var tj = Norm(Sub(pj[1 - aj], V));
-                        if (!enabled || Math.Abs(Dot(ti, tj)) > 0.02) continue;   // blending off / not perpendicular
+                        Func<IEdge, double[][], int, bool, double[]> away = (e, pe, a, line) =>   // direction leaving V along the edge (an arc: its tangent, towards the other end)
+                        {
+                            var chord = Sub(pe[1 - a], pe[a]);
+                            if (line) return Norm(chord);
+                            var tg = TangentAt(e, pe[a]);
+                            return Dot(tg, chord) < 0 ? Scale(tg, -1) : tg;
+                        };
+                        var ti = away(ei, pi, ai, li);
+                        var tj = away(ej, pj, aj, lj);
+                        if (!enabled || Math.Abs(Dot(ti, tj)) > 0.9999) continue;   // blending off / edges in line
                         var fi = ((object[])ei.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
                         var fj = ((object[])ej.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
                         int ci = -1, cj = -1;
                         for (int a = 0; a < 2; a++) for (int b = 0; b < 2; b++) if (fi[a].IsSame(fj[b])) { ci = a; cj = b; }
                         if (ci < 0) continue;                               // no shared face
                         var nC = PlaneNormal(fi[ci]);
-                        var nA = PlaneNormal(fi[1 - ci]);
-                        var nB = PlaneNormal(fj[1 - cj]);
-                        if (Dot(nA, tj) < 0.98 || Dot(nB, ti) < 0.98) continue;   // not an inside corner on C
+                        Func<IFace2, double[]> wallN = f => ((ISurface)f.GetSurface()).IsPlane() ? PlaneNormal(f) : FaceNormalAt(f, V);
+                        var nA = wallN(fi[1 - ci]);
+                        var nB = wallN(fj[1 - cj]);
+                        if (nA == null || nB == null) continue;
+                        if (Math.Abs(Dot(nC, nA)) > 0.02 || Math.Abs(Dot(nC, nB)) > 0.02) continue;   // both edges must be 90 deg
+                        if (Dot(nA, tj) < 0.02 || Dot(nB, ti) < 0.02) continue;   // not an inside corner on C (each edge leaves V on the air side of the other's wall)
                         var axis = Scale(nC, -1);
                         if ((res[i].Axis != null && Dot(res[i].Axis, axis) < 0.99) || (res[j].Axis != null && Dot(res[j].Axis, axis) < 0.99))
                             continue;                                       // already blended on a different face
                         res[i].Axis = axis; res[j].Axis = axis;
                         res[i].End[ai] = true; res[j].End[aj] = true;
-                        res[i].Corners.Add(new Corner { V = V, DirA = Scale(ti, -1), DirB = Scale(tj, -1) });
+                        (li ? res[i] : res[j]).Corners.Add(new Corner { V = V, DirA = Scale(ti, -1), DirB = Scale(tj, -1) });   // a straight edge owns the cone
                     }
                     catch { }
                 }
-            if (flat) FindFlatCorners(edges, res);
+            FindJoins(edges, res);
+            if (flat) FindFlatCorners(edges, p, flipAt, res);
             return res;
         }
 
         // Flat corner (native Chamfer style): three selected, mutually perpendicular edges meeting at an outside
         // corner V. The three chamfers alone meet in a point; this adds a cut by the plane through the three points
         // where the chamfer lines meet on each face: (p - V)·(n1 + n2 + n3) = -2d.
-        static void FindFlatCorners(IList<IEdge> edges, BlendInfo[] res)
+        // Legs of the chamfer an edge gets (same mill-face choice as Tools): dF on the mill's face fF, dG on the other.
+        static void Legs(IEdge e, ChamferParams p, bool flip, out IFace2 fF, out double dF, out double dG)
+        {
+            var adj = (object[])e.GetTwoAdjacentFaces2();
+            var f1 = (IFace2)adj[0]; var f2 = (IFace2)adj[1];
+            var n1 = PlaneNormal(f1); var n2 = PlaneNormal(f2);
+            bool fromF1;
+            if (Math.Abs(n1[2] - n2[2]) > 0.3) fromF1 = n1[2] > n2[2]; else fromF1 = f1.GetArea() >= f2.GetArea();
+            if (flip) fromF1 = !fromF1;
+            fF = fromF1 ? f1 : f2;
+            double phi = Math.PI - Math.Acos(Math.Max(-1, Math.Min(1, Dot(n1, n2))));
+            dF = p.Size; dG = dF * Math.Sin(p.Angle) / Math.Sin(phi + p.Angle);
+        }
+
+        // Three selected edges meeting at an outside corner V (any angles): where the chamfer lines of two edges meet on
+        // a face is T = V + (lb e_a + la e_b) / sin(delta); the corner is then cut flat by the plane through the three T.
+        static void FindFlatCorners(IList<IEdge> edges, ChamferParams p, Func<int, bool> flipAt, BlendInfo[] res)
         {
             var ends = new List<Tuple<int, int, double[]>>();
             for (int i = 0; i < edges.Count; i++)
@@ -667,18 +699,42 @@ namespace MfgChamfer
                         var other = (double[])((IVertex)(e.Item2 == 0 ? ed.GetEndVertex() : ed.GetStartVertex())).GetPoint();
                         return Norm(Sub(other, V));
                     }).ToArray();
-                    if (Math.Abs(Dot(t[0], t[1])) > 0.02 || Math.Abs(Dot(t[0], t[2])) > 0.02 || Math.Abs(Dot(t[1], t[2])) > 0.02) continue;
                     var faces = new List<IFace2>();
                     foreach (var e in at)
                         foreach (IFace2 f in (object[])edges[e.Item1].GetTwoAdjacentFaces2())
                             if (!faces.Any(g => g.IsSame(f))) faces.Add(f);
                     if (faces.Count != 3) continue;
                     var n = faces.Select(PlaneNormal).ToArray();
-                    // outside corner: each edge runs away from V against the normal of the face it does not touch
-                    bool convex = t.All(tk => n.Any(nk => Dot(tk, nk) < -0.98));
+                    // outside corner: each edge runs into the material side of the face it does not touch
+                    bool convex = true;
+                    for (int k = 0; k < 3 && convex; k++)
+                    {
+                        var adj = ((object[])edges[at[k].Item1].GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
+                        for (int m = 0; m < 3; m++)
+                            if (!adj.Any(a => a.IsSame(faces[m])) && Dot(t[k], n[m]) > -0.02) convex = false;
+                    }
                     if (!convex) continue;
+                    // leg of every edge's chamfer on every face it touches
+                    var legOn = new double[3, 3];
+                    for (int k = 0; k < 3; k++)
+                    {
+                        IFace2 fF; double dF, dG;
+                        int idx = at[k].Item1;
+                        Legs(edges[idx], p, flipAt(idx), out fF, out dF, out dG);
+                        for (int m = 0; m < 3; m++) legOn[k, m] = fF.IsSame(faces[m]) ? dF : dG;
+                    }
+                    var T = new double[3][];
+                    for (int m = 0; m < 3; m++)
+                    {
+                        var on = Enumerable.Range(0, 3).Where(k => ((object[])edges[at[k].Item1].GetTwoAdjacentFaces2()).Cast<IFace2>().Any(a => a.IsSame(faces[m]))).ToArray();
+                        if (on.Length != 2) throw new Exception("corner topology");
+                        int a1 = on[0], b1 = on[1];
+                        double cd = Dot(t[a1], t[b1]), sd = Math.Sqrt(1 - cd * cd);
+                        if (sd < 0.02) throw new Exception("degenerate corner");
+                        T[m] = Add(V, Add(Scale(t[a1], legOn[b1, m] / sd), Scale(t[b1], legOn[a1, m] / sd)));
+                    }
                     int owner = at.Min(e => e.Item1);
-                    res[owner].Flats.Add(new[] { V, n[0], n[1], n[2] });
+                    res[owner].Flats.Add(new[] { V, T[0], T[1], T[2] });
                 }
                 catch { }
             }
@@ -705,7 +761,10 @@ namespace MfgChamfer
         {
             var box = f.GetBox() as double[];
             if (box == null) return false;
-            var cp = f.GetClosestPointOn((box[0] + box[3]) / 2, (box[1] + box[4]) / 2, (box[2] + box[5]) / 2) as double[];
+            // interior point (UV middle): the box centre of a curved band is off the face, and its closest point lies on a shared edge
+            double[] cp = null;
+            try { var uv = f.GetUVBounds() as double[]; var ev = ((ISurface)f.GetSurface()).Evaluate((uv[0] + uv[1]) / 2, (uv[2] + uv[3]) / 2, 0, 0) as double[]; if (ev != null) cp = new[] { ev[0], ev[1], ev[2] }; } catch { }
+            if (cp == null) cp = f.GetClosestPointOn((box[0] + box[3]) / 2, (box[1] + box[4]) / 2, (box[2] + box[5]) / 2) as double[];
             if (cp == null) return false;
             foreach (var o in origFaces)
             {
@@ -741,13 +800,16 @@ namespace MfgChamfer
             return best;
         }
 
-        // Tool bodies for one edge: triangular prism along the kept length + a cone at each blocked end.
+        // Tool bodies for one edge: chamfer prism along the kept length + a cone at each blocked end.
+        // Cross-section (plane normal to the edge, O = the edge): the mill comes from face F (axis normal to F). The chamfer
+        // line runs from A on F (Size from the edge) at the chamfer angle to B on the other face G; C lies outside the part.
         public static IEnumerable<IBody2> Tools(IEdge edge, ChamferParams p, IModeler modeler, IMathUtility math, bool flip,
-                                                 List<double[][]> lines = null, double[] expected = null, BlendInfo blend = null)
+                                                 List<double[][]> lines = null, double[] expected = null, BlendInfo blend = null, EdgeCut cut = null)
         {
             if (blend == null) blend = new BlendInfo();
             var curve = (ICurve)edge.GetCurve();
-            if (!curve.IsLine()) throw new Exception("only straight edges are supported");
+            if (curve.IsCircle()) return CircleTools(edge, p, modeler, math, expected, lines, blend, flip);
+            if (!curve.IsLine()) throw new Exception("only straight edges and circular arcs are supported");
             var v0 = edge.GetStartVertex() as IVertex;
             var v1 = edge.GetEndVertex() as IVertex;
             if (v0 == null || v1 == null) throw new Exception("edge has no end points");
@@ -762,13 +824,14 @@ namespace MfgChamfer
             var f2 = (IFace2)adj[1];
             var n1 = PlaneNormal(f1);
             var n2 = PlaneNormal(f2);
-            if (Math.Abs(Dot(n1, n2)) > 0.02) throw new Exception("only 90 deg edges are supported");
+            if (Math.Abs(Dot(n1, n2)) > 0.9999) throw new Exception("the two faces at the edge are tangent or parallel");
 
-            // Convex check: moving into face1 means moving along -n2
+            // Direction from the edge into each face. Outside edge: each lies behind the plane of the other face.
             var mid = Scale(Add(p0, p1), 0.5);
-            var probe = Add(mid, Scale(n2, -Math.Min(p.Size, len) * 0.5));
-            var cp = f1.GetClosestPointOn(probe[0], probe[1], probe[2]) as double[];
-            if (cp == null || Len(Sub(cp, probe)) > 1e-6)
+            double probeD = Math.Min(p.Size, len) * 0.1;
+            var u1 = IntoFace(f1, n1, t, mid, probeD);
+            var u2 = IntoFace(f2, n2, t, mid, probeD);
+            if (u1 == null || u2 == null || Dot(u1, n2) > -1e-6 || Dot(u2, n1) > -1e-6)
                 throw new Exception("edge is concave (inside corner) - pick outside edges");
 
             // Which face the chamfer mill comes from: the more upward-facing one (+Z), else the larger face
@@ -777,14 +840,28 @@ namespace MfgChamfer
             else fromF1 = f1.GetArea() >= f2.GetArea();
             if (flip) fromF1 = !fromF1;
             if (blend.Axis != null) fromF1 = Dot(n1, blend.Axis) < -0.5;   // blended: tool comes from the shared face
-            var axis = fromF1 ? Scale(n1, -1) : Scale(n2, -1);     // tool axis, pointing into the material
+            var nF = fromF1 ? n1 : n2; var nG = fromF1 ? n2 : n1;
+            var uF = fromF1 ? u1 : u2; var uG = fromF1 ? u2 : u1;
+            var axis = Scale(nF, -1);                                       // tool axis, pointing into the material
+
+            double phi = Math.Acos(Math.Max(-1, Math.Min(1, Dot(uF, uG))));   // angle of the material wedge at the edge
+            double beta = p.Angle;
+            if (beta > Math.PI - phi - 0.002)
+                throw new Exception(string.Format(CultureInfo.InvariantCulture, "chamfer angle must be below {0:0.#} deg on this {1:0.#} deg edge",
+                    (Math.PI - phi) * 180 / Math.PI - 0.1, phi * 180 / Math.PI));
+            double d1 = p.Size;                                    // leg on F
+            double d2 = d1 * Math.Sin(beta) / Math.Sin(phi + beta);   // leg on G
+            double hB = d2 * Math.Sin(phi);                        // depth of the chamfer bottom (on G) below F
+            double rF = hB / Math.Tan(beta);                       // mill radius where its cone meets F
+            if (p.ToolDia / 2 < rF - 1e-9)
+                throw new Exception(string.Format(CultureInfo.InvariantCulture, "tool diameter must be at least {0:0.###} mm for this chamfer", 2 * rF * 1000));
 
             double stop = p.ToolDia / 2 + p.Clearance;
             bool b0 = !blend.End[0] && Blocked(v0, Scale(t, -1), n1, n2);
             bool b1 = !blend.End[1] && Blocked(v1, t, n1, n2);
-            double ext = p.Size;
-            double s0 = blend.End[0] ? 0 : b0 ? stop : -ext;       // blended ends run exactly to the corner
-            double s1 = blend.End[1] ? len : b1 ? len - stop : len + ext;
+            double ext = Math.Max(d1, d2);
+            double s0 = blend.End[0] || blend.Join[0] ? 0 : b0 ? stop : -ext;       // blended / joined ends run exactly to the corner / neighbour
+            double s1 = blend.End[1] || blend.Join[1] ? len : b1 ? len - stop : len + ext;
             if (s1 - s0 < 1e-6)
                 throw new Exception(string.Format(CultureInfo.InvariantCulture,
                     "edge ({0:0.###} mm) too short for a {1:0.###} mm tool between walls", len * 1000, p.ToolDia * 1000));
@@ -792,72 +869,111 @@ namespace MfgChamfer
             if (expected != null)
             {
                 double inside = Math.Max(0, Math.Min(s1, len) - Math.Max(s0, 0));
-                double d = p.Size;
-                expected[0] = d * d / 2 * inside + ((b0 ? 1 : 0) + (b1 ? 1 : 0) + 2 * blend.Corners.Count) * Math.PI * d * d * d / 12;
+                double aTri = 0.5 * d1 * d2 * Math.Sin(phi);
+                expected[0] = aTri * inside + ((b0 ? 1 : 0) + (b1 ? 1 : 0)) * ((b0 || b1) ? LugVolume(hB, beta, Dot(nF, nG)) : 0)
+                            + blend.Corners.Sum(c => (2 * Math.PI - c.Gamma) * d1 * d1 * hB / 6);   // the cone's share in the material (upper bound)
                 // Open ends: the tool runs on past the end (prism extended by ext). Usually that is air, but it may
                 // shave material the end meets at an angle (e.g. an existing chamfer) - a real run-off, not a wall.
-                int open = (b0 || blend.End[0] ? 0 : 1) + (b1 || blend.End[1] ? 0 : 1);
-                expected[0] += open * d * d / 2 * ext;
-                expected[0] += blend.Flats.Count * d * d * d / 3;   // corner tetrahedron V-T1-T2-T3
-                // A corner cone removes two quarter-cones of material beyond this edge's own prism: the inside-corner
-                // quadrant and the quadrant along the partner edge (cut before the partner's prism, so it counts here).
+                int open = (b0 || blend.End[0] || blend.Join[0] ? 0 : 1) + (b1 || blend.End[1] || blend.Join[1] ? 0 : 1);
+                expected[0] += open * aTri * ext;
+                foreach (var f in blend.Flats)   // corner tetrahedron V-T1-T2-T3
+                    expected[0] += 1.5 * Math.Abs(Dot(Sub(f[1], f[0]), Cross(Sub(f[2], f[0]), Sub(f[3], f[0])))) / 6;
+            }
+            if (cut != null)
+            {
+                var m = Norm(Cross(t, Sub(Scale(uG, d2), Scale(uF, d1))));
+                cut.Normal = Dot(m, Add(nF, nG)) < 0 ? Scale(m, -1) : m;
+                cut.Dir = t;
             }
             if (lines != null)
             {
-                PreviewLines(lines, p0, t, len, s0, s1, b0, b1, fromF1 ? n1 : n2, fromF1 ? n2 : n1, p.Size);
-                foreach (var c in blend.Corners) CornerLines(lines, c, axis, p.Size);
+                PreviewLines(lines, p0, t, s0, s1, b0, b1, uF, uG, d2, phi, rF);
+                foreach (var c in blend.Corners) CornerLines(lines, c, axis, p.Size, hB);
             }
 
             var list = new List<IBody2>();
-            list.Add(Prism(Add(p0, Scale(t, s0)), t, s1 - s0, n1, n2, p.Size, modeler, math));
-            if (b0) list.Add(Cone(Add(p0, Scale(t, s0)), axis, p.Size, stop, modeler));
-            if (b1) list.Add(Cone(Add(p0, Scale(t, s1)), axis, p.Size, stop, modeler));
-            foreach (var c in blend.Corners) list.Add(Cone(c.V, axis, p.Size, 10 * p.Size, modeler));
-            foreach (var f in blend.Flats) list.Add(FlatCornerTool(f[0], f[1], f[2], f[3], p.Size, modeler, math));
+            list.Add(Prism(Add(p0, Scale(t, s0)), t, s1 - s0, Scale(uF, d1), Scale(uG, d2), Scale(Add(nF, nG), ext), uF, modeler, math));
+            Func<double, double[]> apexAt = s => Add(Add(p0, Scale(t, s)), Scale(uG, d2));   // the mill tip sits on the chamfer's bottom edge
+            if (b0) list.Add(Cone(apexAt(s0), axis, hB, beta, stop, modeler));
+            if (b1) list.Add(Cone(apexAt(s1), axis, hB, beta, stop, modeler));
+            foreach (var c in blend.Corners) list.Add(Cone(Add(c.V, Scale(axis, hB)), axis, hB, beta, 10 * Math.Max(d1, hB), modeler));
+            foreach (var f in blend.Flats) list.Add(FlatCornerTool(f, modeler, math));
             return list;
         }
 
-        // Triangle T1 T2 T3 (where the chamfer lines meet on each face) swept outwards past the corner.
-        static IBody2 FlatCornerTool(double[] V, double[] n1, double[] n2, double[] n3, double d, IModeler modeler, IMathUtility math)
+        // Unit direction from the edge into face f (perpendicular to the edge direction t): the side that lies on the face
+        static double[] IntoFace(IFace2 f, double[] n, double[] t, double[] mid, double d)
         {
-            var a = Sub(V, Scale(Add(n2, n3), d));
-            var b = Sub(V, Scale(Add(n1, n3), d));
-            var c = Sub(V, Scale(Add(n1, n2), d));
-            var s = Norm(Add(Add(n1, n2), n3));
-            var surf = (ISurface)modeler.CreatePlanarSurface2(a, s, Norm(Sub(b, a)));
+            var v = Norm(Cross(t, n));
+            foreach (var s in new[] { 1.0, -1.0 })
+            {
+                var pr = Add(mid, Scale(v, s * d));
+                var cp = f.GetClosestPointOn(pr[0], pr[1], pr[2]) as double[];
+                if (cp != null && Len(Sub(cp, pr)) < 1e-6) return Scale(v, s);
+            }
+            return null;
+        }
+
+        // Material the mill's cone removes beyond the end of the prism (half of its part inside the wedge):
+        // slices of the cone (apex on the other face G, axis normal to F) cut by G's plane. cosPsi = nF . nG.
+        static double LugVolume(double hB, double beta, double cosPsi)
+        {
+            double cot = 1 / Math.Tan(beta), sum = 0;
+            const int n = 200;
+            for (int i = 0; i < n; i++)
+            {
+                double h = hB * (i + 0.5) / n, r = h * cot, D = h * cosPsi, a;   // D: signed distance of the axis from G's plane (+ = outside)
+                if (D >= r) a = 0;
+                else if (D <= -r) a = Math.PI * r * r;
+                else a = r * r * Math.Acos(D / r) - D * Math.Sqrt(r * r - D * D);
+                sum += a;
+            }
+            return 0.5 * sum * hB / n;
+        }
+
+        // Triangle T1 T2 T3 (where the chamfer lines meet on each face) swept outwards past the corner.
+        static IBody2 FlatCornerTool(double[][] f, IModeler modeler, IMathUtility math)
+        {
+            var V = f[0]; var a = f[1]; var b = f[2]; var c = f[3];
+            var nrm = Norm(Cross(Sub(b, a), Sub(c, a)));
+            var cen = Scale(Add(Add(a, b), c), 1.0 / 3);
+            var s = Norm(Sub(V, cen));                               // from the cutting plane towards the corner
+            double h = 2 * Math.Max(Len(Sub(V, a)), Math.Max(Len(Sub(V, b)), Len(Sub(V, c))));
+            var surf = (ISurface)modeler.CreatePlanarSurface2(a, Dot(nrm, s) >= 0 ? nrm : Scale(nrm, -1), Norm(Sub(b, a)));
             var sheet = surf.CreateTrimmedSheet4(new[] { Seg(modeler, a, b), Seg(modeler, b, c), Seg(modeler, c, a) }, true) as IBody2;
             if (sheet == null) throw new Exception("could not build flat corner");
-            var body = modeler.CreateExtrudedBody((Body2)sheet, (MathVector)math.CreateVector(s), 2 * d);
+            var body = modeler.CreateExtrudedBody((Body2)sheet, (MathVector)math.CreateVector(s), h);
             if (body == null) throw new Exception("could not build flat corner");
             return body;
         }
 
         // Preview of a blended corner: the radius-d arc on the shared face and generator lines to the cone apex.
-        static void CornerLines(List<double[][]> lines, Corner c, double[] axis, double d)
+        static void CornerLines(List<double[][]> lines, Corner c, double[] axis, double d, double hB)
         {
-            Func<double, double[]> arc = th => Add(c.V, Add(Scale(c.DirB, d * Math.Cos(th)), Scale(c.DirA, d * Math.Sin(th))));
-            var apex = Add(c.V, Scale(axis, d));
+            var u = c.DirB;
+            var w = Norm(Sub(c.DirA, Scale(u, Dot(c.DirA, u))));
+            double g = c.Gamma;
+            Func<double, double[]> arc = th => Add(c.V, Add(Scale(u, d * Math.Cos(th)), Scale(w, d * Math.Sin(th))));
+            var apex = Add(c.V, Scale(axis, hB));
             const int segs = 16;
             for (int i = 0; i < segs; i++)
-                lines.Add(new[] { arc(Math.PI / 2 * i / segs), arc(Math.PI / 2 * (i + 1) / segs) });
+                lines.Add(new[] { arc(g * i / segs), arc(g * (i + 1) / segs) });
             for (int i = 0; i <= 4; i++)
-                lines.Add(new[] { apex, arc(Math.PI / 2 * i / 4) });
+                lines.Add(new[] { apex, arc(g * i / 4) });
         }
 
         // Generator strokes on each runout cone (outline and hatch of the flat faces come from FaceLines).
-        // nt = normal of the face the tool comes from, no = the other face.
-        static void PreviewLines(List<double[][]> lines, double[] p0, double[] t, double len, double s0, double s1,
-                                 bool b0, bool b1, double[] nt, double[] no, double d)
+        static void PreviewLines(List<double[][]> lines, double[] p0, double[] t, double s0, double s1, bool b0, bool b1,
+                                 double[] uF, double[] uG, double d2, double phi, double rF)
         {
-            Func<double, double[]> onEdge = s => Add(p0, Scale(t, s));
-            var B = Scale(nt, -d);     // offset to the chamfer line on the other face
             foreach (var end in new[] { Tuple.Create(b0, s0, Scale(t, -1)), Tuple.Create(b1, s1, t) })
             {
                 if (!end.Item1) continue;
-                var S = onEdge(end.Item2);
+                var S = Add(p0, Scale(t, end.Item2));
                 var w = end.Item3;
-                var apex = Add(S, B);
-                Func<double, double[]> arc = th => Add(S, Add(Scale(w, d * Math.Cos(th)), Scale(no, -d * Math.Sin(th))));
+                var apex = Add(S, Scale(uG, d2));
+                var Z = Add(S, Scale(uF, d2 * Math.Cos(phi)));   // centre of the cone's circle on face F
+                Func<double, double[]> arc = th => Add(Z, Add(Scale(w, rF * Math.Cos(th)), Scale(uF, rF * Math.Sin(th))));
                 const int segs = 16;
                 for (int i = 0; i < segs; i++)
                     lines.Add(new[] { arc(Math.PI / 2 * i / segs), arc(Math.PI / 2 * (i + 1) / segs) });
@@ -867,7 +983,10 @@ namespace MfgChamfer
         }
 
         // An end is blocked when another face at the vertex faces back along the edge (a wall).
-        static bool Blocked(IVertex v, double[] outDir, double[] n1, double[] n2)
+        static bool Blocked(IVertex v, double[] outDir, double[] n1, double[] n2) { return Blocker(v, outDir, n1, n2) != null; }
+
+        // Normal of the wall that blocks the edge's end at v (null: open end)
+        static double[] Blocker(IVertex v, double[] outDir, double[] n1, double[] n2)
         {
             var pt = (double[])v.GetPoint();
             foreach (IFace2 f in (object[])v.GetAdjacentFaces())
@@ -875,9 +994,9 @@ namespace MfgChamfer
                 var n = FaceNormalAt(f, pt);
                 if (n == null) continue;
                 if (Dot(n, n1) > 0.999 || Dot(n, n2) > 0.999) continue;  // the edge's own faces
-                if (Dot(n, outDir) < -0.5) return true;
+                if (Dot(n, outDir) < -0.5) return n;
             }
-            return false;
+            return null;
         }
 
         static double[] PlaneNormal(IFace2 f)
@@ -894,17 +1013,15 @@ namespace MfgChamfer
             var ev = s.EvaluateAtPoint(pt[0], pt[1], pt[2]) as double[];
             if (ev == null) return null;
             var n = Norm(new[] { ev[0], ev[1], ev[2] });
-            return f.FaceInSurfaceSense() ? n : Scale(n, -1);
+            return f.FaceInSurfaceSense() ? Scale(n, -1) : n;   // measured on a boss (false) and a bore (true): the raw normal is the face normal when the sense is false
         }
 
-        // Triangle (on face1, on face2, outside apex) swept along the edge.
-        static IBody2 Prism(double[] o, double[] t, double len, double[] n1, double[] n2, double d,
+        // Triangle (A on face F, B on the other face, C outside), given as offsets from o, swept along the edge.
+        static IBody2 Prism(double[] o, double[] t, double len, double[] a, double[] b, double[] c, double[] refDir,
                             IModeler modeler, IMathUtility math)
         {
-            var a = Add(o, Scale(n2, -d));                       // on face1
-            var b = Add(o, Scale(n1, -d));                       // on face2
-            var c = Add(o, Scale(Add(n1, n2), d));               // outside the part
-            var surf = (ISurface)modeler.CreatePlanarSurface2(o, t, n1);
+            a = Add(o, a); b = Add(o, b); c = Add(o, c);
+            var surf = (ISurface)modeler.CreatePlanarSurface2(o, t, refDir);
             var curves = new[] { Seg(modeler, a, b), Seg(modeler, b, c), Seg(modeler, c, a) };
             var sheet = surf.CreateTrimmedSheet4(curves, true) as IBody2;
             if (sheet == null) throw new Exception("could not build chamfer profile");
@@ -916,21 +1033,10 @@ namespace MfgChamfer
 
         // Preview strokes taken from the computed result: outline of every new face, plus hatch lines along the
         // chamfered edge's direction on new flat faces. Matches the real geometry at any corner.
-        public static void FaceLines(IBody2 result, List<IFace2> origFaces, IList<IEdge> edges, List<double[][]> lines)
+        public static void FaceLines(IBody2 result, List<IFace2> origFaces, IList<EdgeCut> plans, List<double[][]> lines)
         {
             // chamfer-plane normal -> direction of the edge that made it
-            var dirs = new List<double[][]>();
-            foreach (var e in edges)
-            {
-                try
-                {
-                    var f = ((object[])e.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
-                    var a = (double[])((IVertex)e.GetStartVertex()).GetPoint();
-                    var b = (double[])((IVertex)e.GetEndVertex()).GetPoint();
-                    dirs.Add(new[] { Norm(Add(PlaneNormal(f[0]), PlaneNormal(f[1]))), Norm(Sub(b, a)) });
-                }
-                catch { }
-            }
+            var dirs = plans.Where(c => c != null && c.Normal != null).Select(c => new[] { c.Normal, c.Dir }).ToList();
             foreach (IFace2 f in (object[])result.GetFaces())
             {
                 if (!IsNewFace(f, origFaces)) continue;
@@ -975,12 +1081,43 @@ namespace MfgChamfer
             var c = (ICurve)e.GetCurve();
             // End points from the vertices: on result bodies the curve parameters can still span the tool body's
             // (longer) edge, which drew strokes past the part.
-            var v0 = e.GetStartVertex() as IVertex;
-            var v1 = e.GetEndVertex() as IVertex;
-            if (v0 == null || v1 == null) return new List<double[]>();   // closed edge: not expected on chamfer faces
-            var a = (double[])v0.GetPoint();
-            var b = (double[])v1.GetPoint();
+            var ab = Ends(e);
+            var a = ab[0];
+            var b = ab[1];
             if (c.IsLine()) return new List<double[]> { a, b };
+            if (Dist(a, b) < 1e-9)   // closed edge (full circle): sample its whole curve range
+            {
+                var prm = e.GetCurveParams3();
+                var ring = new List<double[]>();
+                for (int i = 0; i <= 64; i++)
+                {
+                    var q = (double[])c.Evaluate2(prm.UMinValue + (prm.UMaxValue - prm.UMinValue) * i / 64, 0);
+                    ring.Add(new[] { q[0], q[1], q[2] });
+                }
+                return ring;
+            }
+            if (c.IsCircle())   // arc: sample it by angle (the tessellation call returned nothing useful on result bodies)
+            {
+                var cp = (double[])c.CircleParams;
+                var o = new[] { cp[0], cp[1], cp[2] };
+                var ax = Norm(new[] { cp[3], cp[4], cp[5] });
+                var ra = Sub(a, o);
+                double th = Math.Atan2(Dot(Cross(ra, Sub(b, o)), ax), Dot(ra, Sub(b, o)));
+                if (th < 0) th += 2 * Math.PI;
+                foreach (var sweep in new[] { th, th - 2 * Math.PI })   // counter-clockwise or clockwise from a to b: the one that is the edge
+                {
+                    var mid = Add(o, Add(Scale(ra, Math.Cos(sweep / 2)), Scale(Cross(ax, ra), Math.Sin(sweep / 2))));
+                    var cl = e.GetClosestPointOn(mid[0], mid[1], mid[2]) as double[];
+                    if (cl == null || Dist(cl, mid) > 1e-6) continue;
+                    var arcPts = new List<double[]>();
+                    for (int i = 0; i <= 32; i++)
+                    {
+                        double ph = sweep * i / 32;
+                        arcPts.Add(Add(o, Add(Scale(ra, Math.Cos(ph)), Scale(Cross(ax, ra), Math.Sin(ph)))));
+                    }
+                    return arcPts;
+                }
+            }
             var flat = c.GetTessPts(1e-5, 1e-4, a, b) as double[];
             var pts = new List<double[]>();
             if (flat != null)
@@ -1003,19 +1140,22 @@ namespace MfgChamfer
             return line.CreateTrimmedCurve2(a[0], a[1], a[2], b[0], b[1], b[2]);
         }
 
-        // 90 deg chamfer-mill footprint: cone with its axis on the edge, apex at chamfer depth.
-        static IBody2 Cone(double[] s, double[] axis, double d, double stop, IModeler modeler)
+        // Chamfer-mill footprint: cone with its tip (apex) on the chamfer's bottom edge, axis normal to the mill's face,
+        // hB deep below that face; half angle = 90 deg - chamfer angle.
+        static IBody2 Cone(double[] apex, double[] axis, double hB, double beta, double stop, IModeler modeler)
         {
+            double cot = 1 / Math.Tan(beta);
             // Start a bit outside the part, but never wider than the tool reaches (stop = distance to the wall),
             // otherwise the part of the cone above the surface would cut into the wall.
-            double e = Math.Max(0, Math.Min(d * 0.5, stop - d - 1e-6));
-            var baseC = Add(s, Scale(axis, -e));
+            double e = Math.Max(0, Math.Min(hB * 0.5, (stop - hB * cot - 1e-6) * Math.Tan(beta)));
+            var baseC = Sub(apex, Scale(axis, hB + e));
+            double H = hB + e;
             // true pointed cone (apex exactly at chamfer depth); fall back to a tiny tip if the kernel refuses
-            var body = modeler.CreateBodyFromCone(new[] { baseC[0], baseC[1], baseC[2], axis[0], axis[1], axis[2], d + e, 0.0, d + e }) as IBody2;
+            var body = modeler.CreateBodyFromCone(new[] { baseC[0], baseC[1], baseC[2], axis[0], axis[1], axis[2], H * cot, 0.0, H }) as IBody2;
             if (body == null)
             {
-                double rTop = d * 1e-3;
-                body = modeler.CreateBodyFromCone(new[] { baseC[0], baseC[1], baseC[2], axis[0], axis[1], axis[2], d + e, rTop, d + e - rTop }) as IBody2;
+                double rTop = hB * 1e-3;
+                body = modeler.CreateBodyFromCone(new[] { baseC[0], baseC[1], baseC[2], axis[0], axis[1], axis[2], H * cot, rTop, H - rTop * Math.Tan(beta) }) as IBody2;
             }
             if (body == null) throw new Exception("could not build tool runout");
             return body;
@@ -1093,7 +1233,7 @@ namespace MfgChamfer
     [ComVisible(true)]
     public class ChamferPage : IPropertyManagerPage2Handler9
     {
-        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdMenuReverse = 30;
+        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdAngle = 26, IdMenuReverse = 30;
         const string FlipCaption = "Reverse direction";
         readonly ISldWorks sw;
         readonly IModelDoc2 model;
@@ -1102,19 +1242,20 @@ namespace MfgChamfer
         readonly ChamferParams p;
         IPropertyManagerPage2 page;
         IPropertyManagerPageSelectionbox sel;
-        IPropertyManagerPageNumberbox numSize, numDia, numClr;
-        IPropertyManagerPageCheckbox chkFlip, chkBlend, chkFlat;
+        IPropertyManagerPageNumberbox numSize, numAngle, numDia, numClr;
+        IPropertyManagerPageCheckbox chkBlend, chkFlat;
         bool ok;
         List<object> edges = new List<object>();
         readonly List<IBody2> preview = new List<IBody2>();
         bool shown;
+        readonly List<object> keep = new List<object>();   // group boxes and labels: SOLIDWORKS does not hold them, a GC that finalizes their wrappers stops all PropertyManager callbacks
         bool busy;                // re-entrancy guard for the preview
-        bool syncing;             // set while the checkbox is updated from code
         IBody2 hidden;            // real body hidden during preview
         readonly Dictionary<string, bool> flips = new Dictionary<string, bool>();   // per edge (by geometry key)
-        const string Hint = "Select straight outside edges. Ends that run into a wall stop at tool radius + clearance " +
-                            "and finish with the cone a 90° chamfer mill leaves.\n" +
+        const string Hint = "Select outside edges (straight at any angle between the faces, or circle / arc edges of holes, bosses and pocket corners; select a whole tangent chain).  Ends that run into a wall stop at tool radius + clearance " +
+                            "and finish with the cone the chamfer mill leaves (mill angle = 180° - 2 x chamfer angle).\n" +
                             "Reverse direction applies to the edge highlighted in the list (or the last one picked).";
+
 
         public ChamferPage(ISldWorks sw, IModelDoc2 model, IFeature feat, IMacroFeatureData data)
         {
@@ -1140,25 +1281,35 @@ namespace MfgChamfer
             short left = (short)swPropertyManagerPageControlLeftAlign_e.swControlAlign_LeftEdge;
             short indent = (short)swPropertyManagerPageControlLeftAlign_e.swControlAlign_Indent;
 
-            var g1 = (IPropertyManagerPageGroup)page.AddGroupBox(1, "Items To Chamfer", gOpts);
+            var g1 = (IPropertyManagerPageGroup)page.AddGroupBox(1, "Items To Chamfer", gOpts); keep.Add(g1);
             sel = (IPropertyManagerPageSelectionbox)g1.AddControl2(IdSel,
                 (short)swPropertyManagerPageControlType_e.swControlType_Selectionbox, "Edges", indent, cOpts,
                 "Straight outside edges to chamfer. Highlight an edge in the list and tick Reverse direction to machine it from its other face.");
             ((IPropertyManagerPageControl)sel).SetStandardPictureLabel((int)swControlBitmapLabelType_e.swBitmapLabel_SelectEdge);
             sel.SingleEntityOnly = false;
-            sel.Height = 70;
+            sel.Height = 50;
             sel.Mark = 1;
             sel.SetSelectionFilters(new[] { (int)swSelectType_e.swSelEDGES });
-            chkFlip = (IPropertyManagerPageCheckbox)g1.AddControl2(IdFlip,
-                (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, FlipCaption, left, cOpts,
+            var flipBtn = (IPropertyManagerPageBitmapButton)g1.AddControl2(IdFlip,
+                (short)swPropertyManagerPageControlType_e.swControlType_BitmapButton, FlipCaption, left, cOpts,
                 "Machine the highlighted edge from its other face (moves the runout cone to the other face). " +
                 "Default: from the upward-facing (+Z) face, or the larger face.");
+            flipBtn.SetStandardBitmaps((int)swPropertyManagerPageBitmapButtons_e.swBitmapButtonImage_reverse_direction);
+            try   // under the selection icon, left of the list (the group below is laid out from this button, so the list is kept short)
+            {
+                var fc = (IPropertyManagerPageControl)flipBtn; var sc = (IPropertyManagerPageControl)sel;
+                fc.Left = 4; fc.Top = (short)(sc.Top + 28);
+            }
+            catch (Exception ex) { Engine.Log("flip button place: " + ex.Message); }
+            keep.Add(flipBtn);   // a control whose wrapper is collected stops responding (the button vanished)
 
-            var g2 = (IPropertyManagerPageGroup)page.AddGroupBox(2, "Chamfer Parameters", gOpts);
-            numSize = Number(g2, IdSize, "Chamfer distance (45°)", p.Size, 0.00001, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance, cOpts, indent, left);
+            var g2 = (IPropertyManagerPageGroup)page.AddGroupBox(2, "Chamfer Parameters", gOpts); keep.Add(g2);
+            numSize = Number(g2, IdSize, "Chamfer distance (on the mill's face)", p.Size, 0.00001, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance, cOpts, indent, left);
+            numAngle = Number(g2, IdAngle, "Chamfer angle (from the mill's face)", p.Angle, 0.0174533, 1.5533, swControlBitmapLabelType_e.swBitmapLabel_AngularDistance, cOpts, indent, left,
+                              swNumberboxUnitType_e.swNumberBox_Angle);
             chkBlend = (IPropertyManagerPageCheckbox)g2.AddControl2(IdBlend,
-                (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, "Blend perpendicular chamfers", left, cOpts,
-                "Two selected perpendicular edges that meet at an inside corner (e.g. a step wall and the floor, on the same side face) " +
+                (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, "Blend chamfers at inside corners", left, cOpts,
+                "Two selected edges that meet at an inside corner (e.g. a step wall and the floor, on the same side face) " +
                 "are chamfered as one tool path from that side face: the chamfer turns around the corner with radius = chamfer distance " +
                 "instead of stopping before the wall.");
             chkBlend.Checked = p.Blend;
@@ -1168,7 +1319,7 @@ namespace MfgChamfer
                 "(needs a 3D move on the machine). Off: the three chamfers meet in a point, as a chamfer mill tracing the edges leaves it.");
             chkFlat.Checked = p.Flat;
 
-            var g3 = (IPropertyManagerPageGroup)page.AddGroupBox(3, "Chamfer Mill", gOpts);
+            var g3 = (IPropertyManagerPageGroup)page.AddGroupBox(3, "Chamfer Mill", gOpts); keep.Add(g3);
             numDia = Number(g3, IdDia, "Tool diameter", p.ToolDia, 0.0001, 1, swControlBitmapLabelType_e.swBitmapLabel_Diameter, cOpts, indent, left);
             numClr = Number(g3, IdClr, "Clearance to wall", p.Clearance, 0, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance1, cOpts, indent, left);
 
@@ -1233,7 +1384,6 @@ namespace MfgChamfer
                 }
                 finally { loading = false; }
             }
-            SyncCheckbox();
             UpdatePreview();
         }
 
@@ -1245,8 +1395,8 @@ namespace MfgChamfer
 
         static bool SameEdge(IEdge e, double[] s)
         {
-            var a = (double[])((IVertex)e.GetStartVertex()).GetPoint();
-            var b = (double[])((IVertex)e.GetEndVertex()).GetPoint();
+            var ab = Engine.Ends(e);
+            var a = ab[0]; var b = ab[1];
             Func<double[], int, double> d = (q, o) => Math.Sqrt(Math.Pow(q[0] - s[o], 2) + Math.Pow(q[1] - s[o + 1], 2) + Math.Pow(q[2] - s[o + 2], 2));
             return (d(a, 0) < 1e-7 && d(b, 3) < 1e-7) || (d(a, 3) < 1e-7 && d(b, 0) < 1e-7);
         }
@@ -1311,8 +1461,8 @@ namespace MfgChamfer
 
         static string Key(IEdge e)
         {
-            var a = (double[])((IVertex)e.GetStartVertex()).GetPoint();
-            var b = (double[])((IVertex)e.GetEndVertex()).GetPoint();
+            var ab = Engine.Ends(e);
+            var a = ab[0]; var b = ab[1];
             Func<double, string> r = v => Math.Round(v * 1e6).ToString(CultureInfo.InvariantCulture);
             return r(a[0] + b[0]) + "," + r(a[1] + b[1]) + "," + r(a[2] + b[2]);
         }
@@ -1344,22 +1494,6 @@ namespace MfgChamfer
             return i >= 0 && i < count ? i : count - 1;
         }
 
-        void SyncCheckbox(int item = -2)
-        {
-            if (!shown || busy) return;
-            try
-            {
-                var list = SelectedEdges();
-                if (item < -1 || item >= list.Count) item = list.Count - 1;
-                syncing = true;
-                chkFlip.Checked = item >= 0 && FlipOf(list[item]);
-                chkFlip.Caption = item >= 0 ? FlipCaption + " (Edge" + (item + 1) + ")" : FlipCaption;
-                ((IPropertyManagerPageControl)chkFlip).Enabled = item >= 0;
-            }
-            catch { }
-            finally { syncing = false; }
-        }
-
         void ToggleCurrent(bool? value)
         {
             var list = SelectedEdges();
@@ -1367,7 +1501,6 @@ namespace MfgChamfer
             if (item < 0) return;
             var key = Key(list[item]);
             flips[key] = value ?? !FlipOf(list[item]);
-            SyncCheckbox(item);
             UpdatePreview();
         }
 
@@ -1400,13 +1533,6 @@ namespace MfgChamfer
                 problem = null;
                 OkCursor(false);
                 if (sel.Count == 0) { Message(HintNow()); model.GraphicsRedraw2(); return; }
-                if (cur.ToolDia < 2 * cur.Size - 1e-7)
-                {
-                    problem = string.Format(CultureInfo.InvariantCulture,
-                        "Tool diameter must be at least 2 x chamfer distance ({0:0.###} mm).", 2 * cur.Size * 1000);
-                    Message(problem);
-                    return;
-                }
                 var modeler = (IModeler)sw.GetModeler();
                 var math = (IMathUtility)sw.GetMathUtility();
                 var errors = new List<string>();
@@ -1416,7 +1542,7 @@ namespace MfgChamfer
                 var result = (IBody2)orig.Copy();
                 var lines = new List<double[][]>();
                 var plans = new List<Engine.EdgeCut>();
-                var blends = Engine.FindBlends(sel, cur.Blend, cur.Flat);
+                var blends = Engine.FindBlends(sel, cur, cur.Blend, cur.Flat, k => FlipOf(sel[k]));
                 for (int k = 0; k < sel.Count; k++)
                 {
                     try { plans.Add(Engine.PlanEdge(sel[k], cur, FlipOf(sel[k]), blends[k], modeler, math, lines)); }
@@ -1443,7 +1569,7 @@ namespace MfgChamfer
                 int color = mp != null && mp.Length >= 3
                     ? (int)(mp[0] * 255) | ((int)(mp[1] * 255) << 8) | ((int)(mp[2] * 255) << 16)
                     : 0xB4B4B4;
-                try { Engine.FaceLines(result, ((object[])orig.GetFaces()).Cast<IFace2>().ToList(), sel, lines); }
+                try { Engine.FaceLines(result, ((object[])orig.GetFaces()).Cast<IFace2>().ToList(), plans, lines); }
                 catch (Exception ex) { Engine.Log("face lines: " + ex.Message); }
                 result.Display3(model, color, (int)swTempBodySelectOptions_e.swTempBodySelectable);
                 preview.Add(result);
@@ -1495,13 +1621,15 @@ namespace MfgChamfer
         }
 
         IPropertyManagerPageNumberbox Number(IPropertyManagerPageGroup g, int id, string label, double val, double min, double max,
-                                             swControlBitmapLabelType_e pic, int cOpts, short indent, short left)
+                                             swControlBitmapLabelType_e pic, int cOpts, short indent, short left,
+                                             swNumberboxUnitType_e unit = swNumberboxUnitType_e.swNumberBox_Length)
         {
-            g.AddControl2(id + 100, (short)swPropertyManagerPageControlType_e.swControlType_Label, label, left, cOpts, "");
+            keep.Add(g.AddControl2(id + 100, (short)swPropertyManagerPageControlType_e.swControlType_Label, label, left, cOpts, ""));
             var nb = (IPropertyManagerPageNumberbox)g.AddControl2(id,
                 (short)swPropertyManagerPageControlType_e.swControlType_Numberbox, label, indent, cOpts, label);
             ((IPropertyManagerPageControl)nb).SetStandardPictureLabel((int)pic);
-            nb.SetRange2((int)swNumberboxUnitType_e.swNumberBox_Length, min, max, true, 0.0005, 0.001, 0.0001);
+            bool ang = unit == swNumberboxUnitType_e.swNumberBox_Angle;
+            nb.SetRange2((int)unit, min, max, true, ang ? Math.PI / 180 : 0.0005, ang ? Math.PI / 36 : 0.001, ang ? Math.PI / 1800 : 0.0001);   // exact 1 / 5 / 0.1 deg steps
             nb.Value = val;
             return nb;
         }
@@ -1593,28 +1721,31 @@ namespace MfgChamfer
         public void OnGroupCheck(int Id, bool Checked) { }
         public void OnCheckboxCheck(int Id, bool Checked)
         {
-            if (Id == IdFlip && !syncing) ToggleCurrent(null);
-            else if (Id == IdBlend) { p.Blend = Checked; UpdatePreview(); }
+            if (Id == IdBlend) { p.Blend = Checked; UpdatePreview(); }
             else if (Id == IdFlat) { p.Flat = Checked; UpdatePreview(); }
         }
         public void OnOptionCheck(int Id) { }
-        public void OnButtonPress(int Id) { }
+        public void OnButtonPress(int Id) { if (Id == IdFlip) ToggleCurrent(null); }
         public void OnTextboxChanged(int Id, string Text) { }
         public void OnNumberboxChanged(int Id, double Value)
         {
             if (Id == IdSize) p.Size = Value;
             else if (Id == IdDia) p.ToolDia = Value;
             else if (Id == IdClr) p.Clearance = Value;
+            else if (Id == IdAngle)
+            {
+                p.Angle = Math.Round(Value * 180 / Math.PI, 4) * Math.PI / 180;   // drop float noise (31.00000043 deg)
+            }
             UpdatePreview();
         }
         public void OnComboboxEditChanged(int Id, string Text) { }
         public void OnComboboxSelectionChanged(int Id, int Item) { }
         public void OnListboxSelectionChanged(int Id, int Item) { }
-        public void OnSelectionboxFocusChanged(int Id) { SyncCheckbox(); }
+        public void OnSelectionboxFocusChanged(int Id) { }
         public void OnSelectionboxListChanged(int Id, int Count)
         {
             if (!loading && missingCount > 0) { missingCount = 0; missing.Clear(); missingNames.Clear(); }
-            UpdatePreview(); SyncCheckbox();
+            UpdatePreview();
         }
         public void OnSelectionboxCalloutCreated(int Id) { }
         public void OnSelectionboxCalloutDestroyed(int Id) { }
@@ -1627,11 +1758,13 @@ namespace MfgChamfer
                 var e = Selection as IEdge;
                 var f = Selection as IFace2;
                 var b = e != null ? e.GetBody() as IBody2 : f != null ? f.GetBody() as IBody2 : null;
+                Engine.Log("submit: edge="+(e!=null)+" face="+(f!=null)+" temp="+(b!=null && b.IsTemporaryBody()));
                 if (b == null || !b.IsTemporaryBody()) return true;
                 object real = hidden == null ? null : e != null ? (object)MapToReal(e, hidden) : MapFaceToReal(f, hidden);
+                Engine.Log("submit: mapped="+(real!=null));
                 if (real != null) { pending.Add(Tuple.Create(real, 1)); selectTimer.Start(); }
             }
-            catch { }
+            catch (Exception ex) { Engine.Log("submit failed: "+ex.Message); }
             return false;
         }
 
@@ -1672,20 +1805,34 @@ namespace MfgChamfer
         // The real edge that a preview edge lies on (unchanged or trimmed edges); null for new chamfer edges
         static IEdge MapToReal(IEdge temp, IBody2 real)
         {
+            // Preview wires run parallel to their real edge, offset by up to ~tool radius: take the real edge
+            // closest to three points along the preview edge (all within 4 mm).
+            // shortcut: parallel real edges closer than 4 mm would be ambiguous, only matters for tiny parts.
             var cp = temp.GetCurveParams3();
             var c = (ICurve)temp.GetCurve();
-            var pt = c.Evaluate2((cp.UMinValue + cp.UMaxValue) / 2, 0) as double[];
-            if (pt == null) return null;
+            var pts = new List<double[]>();
+            foreach (double f in new[] { 0.25, 0.5, 0.75 })
+            {
+                var p = c.Evaluate2(cp.UMinValue + f * (cp.UMaxValue - cp.UMinValue), 0) as double[];
+                if (p == null) return null;
+                pts.Add(p);
+            }
+            IEdge best = null; double bd = 4e-3 * 4e-3;
             foreach (IEdge e in (object[])real.GetEdges())
             {
-                var q = e.GetClosestPointOn(pt[0], pt[1], pt[2]) as double[];
-                if (q == null) continue;
-                double dx = q[0] - pt[0], dy = q[1] - pt[1], dz = q[2] - pt[2];
-                if (dx * dx + dy * dy + dz * dz < 1e-14) return e;
+                double worst = 0;
+                foreach (var p in pts)
+                {
+                    var q = e.GetClosestPointOn(p[0], p[1], p[2]) as double[];
+                    if (q == null) { worst = double.MaxValue; break; }
+                    double dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
+                    worst = Math.Max(worst, dx * dx + dy * dy + dz * dz);
+                }
+                if (worst < bd) { bd = worst; best = e; }
             }
-            return null;
-        }
-        public int OnActiveXControlCreated(int Id, bool Status) { return 0; }
+            if (best == null) Engine.Log("MapToReal: no real edge near preview edge");
+            return best;
+        }        public int OnActiveXControlCreated(int Id, bool Status) { return 0; }
         public void OnSliderPositionChanged(int Id, double Value) { }
         public void OnSliderTrackingCompleted(int Id, double Value) { }
         public bool OnKeystroke(int Wparam, int Message, int Lparam, int Id) { return false; }

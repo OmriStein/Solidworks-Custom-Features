@@ -6,12 +6,13 @@ SOLIDWORKS 2026 add-in (C#, .NET Framework 4, x64) that hosts custom features un
 
 ![CNC Chamfer demo](docs/cnc-chamfer.gif)
 
-A 45° chamfer that can actually be machined with a 90° chamfer mill:
-- Straight, convex, 90° edges.
+A chamfer that can actually be machined with a chamfer mill (default 45 deg chamfer = 90 deg mill; the mill angle is 180 deg minus twice the chamfer angle):
+- Straight convex edges at any angle between the faces, with a chamfer distance (on the mill's face) and a chamfer angle.
+- Circle and arc edges of holes, bosses and pocket corners (planar face + coaxial cylinder / cone); select a whole tangent chain of lines and arcs and the tools meet exactly at the joints. The mill axis follows the circle, so the chamfer is a cone. Reverse direction does not apply to circle edges.
 - Ends that run into a wall stop at tool radius + clearance and finish with the cone the chamfer mill leaves.
 - Per-edge tool direction (Reverse direction).
-- Blend perpendicular chamfers around an inside corner (radius = chamfer distance).
-- Optional flat corner where three chamfers meet (like the native Chamfer).
+- Blend the chamfers around an inside corner (radius = chamfer distance; any chamfer angle, any corner angle).
+- Optional flat corner where three chamfers meet (like the native Chamfer; any chamfer angle and corner angles).
 - Live native-style preview, edit, Ctrl+C / Ctrl+V of the feature settings.
 
 ## Install
