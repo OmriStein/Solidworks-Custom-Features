@@ -18,7 +18,7 @@ using SolidWorks.Interop.swconst;
 using SolidWorks.Interop.swpublished;
 
 [assembly: System.Reflection.AssemblyTitle("Custom-Features")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
 
 namespace MfgChamfer
 {
@@ -612,7 +612,8 @@ namespace MfgChamfer
             public double[] ConeWall;                            // normal of the wall the blended rim runs into: a mill working from that wall is blocked by the floor instead
             public double[][] ConeAxis = new double[2][];
             public double[][] ConeDown = new double[2][];   // the way into the material below the rim's floor at that end (clips the corner cone to a quarter)        // arc ends: axis (into the material) of the corner cone, normal to the plane of both edges at the vertex
-            public bool[] ConeEnd = new bool[2];                 // the end is flush at the vertex but still closes with the mill's own runout cone there
+            public bool Perp;   // part of a rim/rising-edge corner blend: Reverse still applies to it
+        public bool[] ConeEnd = new bool[2];                 // the end is flush at the vertex but still closes with the mill's own runout cone there
             public bool[] Join = new bool[2];                    // start / end vertex continues tangentially into another selected edge
             public double[] Axis;                                // tool axis (into the material) forced by the shared face
             public List<Corner> Corners = new List<Corner>();    // corner cones owned by this edge
@@ -673,7 +674,7 @@ namespace MfgChamfer
                                     if (!fb.Any(f => { var nW = wallN(f); return nW != null && Math.Abs(Dot(nCp, nW)) < 0.02 && Dot(nW, tA) > 0.02; })) continue;   // the rim runs into one of its walls
                                     var axc = Scale(nCp, -1);
                                     if (res[a].Axis != null && Dot(res[a].Axis, axc) < 0.99) continue;
-                                    res[a].Axis = axc; res[a].End[endA] = true; res[b].End[endB] = true; res[b].ConeDown[endB] = axc;
+                                    res[a].Axis = axc; res[a].End[endA] = true; res[b].End[endB] = true; res[a].Perp = true; res[b].Perp = true; res[b].ConeDown[endB] = axc;
                                     // the corner cone is the mill that works from the plane both edges leave V in (B arc or leaning line)
                                     {
                                         var cx = Cross(nCp, tA);   // square to the rim and in the floor plane: with a leaning B this stays horizontal like the wall's own corner cut
@@ -932,8 +933,8 @@ namespace MfgChamfer
             if (Math.Abs(n1[2] - n2[2]) > 0.3) fromF1 = n1[2] > n2[2];
             else fromF1 = f1.GetArea() >= f2.GetArea();
             if (flip) fromF1 = !fromF1;
-            if (blend.Axis != null) fromF1 = Dot(n1, blend.Axis) < -0.5;   // blended: tool comes from the shared face
-            if (blend.ConeWall != null) fromF1 = Dot(n1, blend.ConeWall) < 0.5;   // blended with a rim: the mill works from the face that continues below the corner
+            if (blend.Axis != null) { fromF1 = Dot(n1, blend.Axis) < -0.5; if (blend.Perp && flip) fromF1 = !fromF1; }   // blended: tool comes from the shared face (Reverse measures Size on the other one)
+            if (blend.ConeWall != null) { fromF1 = Dot(n1, blend.ConeWall) < 0.5; if (flip) fromF1 = !fromF1; }   // blended with a rim: the mill works from the face that continues below the corner
             var nF = fromF1 ? n1 : n2; var nG = fromF1 ? n2 : n1;
             var uF = fromF1 ? u1 : u2; var uG = fromF1 ? u2 : u1;
             // blended with a rim at the floor: the chamfer legs are measured in the floor plane and swept along the edge, like the native corner
@@ -1660,9 +1661,9 @@ namespace MfgChamfer
             var list = SelectedEdges();
             int item = CurrentItem(list.Count, true);
             if (item < 0) return;
-            if (list.Count > 1 && value == null)   // an edge in a blend has only one valid direction: nothing to reverse
+            if (list.Count > 1 && value == null)   // an inside-corner blend has only one valid direction: nothing to reverse
             {
-                try { var bl = Engine.FindBlends(list, p, p.Blend, p.Flat, k => FlipOf(list[k])); if (bl[item].Axis != null || bl[item].End[0] || bl[item].End[1]) return; } catch { }
+                try { var bl = Engine.FindBlends(list, p, p.Blend, p.Flat, k => FlipOf(list[k])); if (!bl[item].Perp && (bl[item].Axis != null || bl[item].End[0] || bl[item].End[1])) return; } catch { }
             }
             var key = Key(list[item]);
             flips[key] = value ?? !FlipOf(list[item]);

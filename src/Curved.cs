@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -128,7 +128,7 @@ namespace MfgChamfer
         static List<IBody2> CircleTools(IEdge edge, ChamferParams p, IModeler modeler, IMathUtility math,
                                         double[] expected, List<double[][]> lines = null, BlendInfo blend = null, bool flip = false)
         {
-            if (blend != null && blend.Axis != null) flip = false;   // blended: the mill comes from the shared face
+            if (blend != null && blend.Axis != null && !blend.Perp) flip = false;   // blended: the mill comes from the shared face
             var cp = (double[])((ICurve)edge.GetCurve()).CircleParams;   // centre xyz, axis xyz, radius
             var c = new[] { cp[0], cp[1], cp[2] };
             var ax = Norm(new[] { cp[3], cp[4], cp[5] });
@@ -327,7 +327,7 @@ namespace MfgChamfer
                 if (blk[k] && blend != null && blend.ConeAxis[k] != null)   // corner cone around the normal of the plane of both edges (apex Size deep, radius Size x tan)
                 {
                     var vtxc = ends[k]; var axc = blend.ConeAxis[k];
-                    list.Add(Cone(Add(vtxc, Scale(axc, p.Size)), axc, p.Size, Math.PI / 2 - p.Angle, 10 * Math.Max(p.Size, hB), modeler));
+                    list.Add(Cone(Add(vtxc, Scale(axc, d1)), axc, d1, Math.PI / 2 - beta, 10 * Math.Max(d1, hB), modeler));
                 }
                 else if (blk[k])   // reversed: the mill comes in square to the wall (5-axis), so its runout cone has a radial axis
                 {
@@ -340,7 +340,7 @@ namespace MfgChamfer
             double cot = 1 / Math.Tan(flip ? betaW : beta), hC = flip ? d1 * Math.Sin(phi) : hB;
             if (expected != null)
                 expected[0] = 0.5 * d1 * d2 * Math.Sin(phi) * (R + rhoA + rhoB) / 3 * sp
-                            + Enumerable.Range(0, 2).Where(kk => blk[kk]).Sum(kk => blend != null && blend.ConeAxis[kk] != null ? Math.PI / 3 * p.Size * p.Size * p.Size * Math.Tan(p.Angle) * Math.Tan(p.Angle) : Math.PI * hC * hC * hC * cot * cot / 3);
+                            + Enumerable.Range(0, 2).Where(kk => blk[kk]).Sum(kk => blend != null && blend.ConeAxis[kk] != null ? Math.PI / 3 * d1 * d1 * d1 * Math.Tan(beta) * Math.Tan(beta) : Math.PI * hC * hC * hC * cot * cot / 3);
             if (lines != null)
             {
                 bool full = span > 2 * Math.PI - 1e-6;
