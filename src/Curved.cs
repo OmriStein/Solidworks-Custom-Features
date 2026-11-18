@@ -40,7 +40,7 @@ namespace MfgChamfer
                             {
                                 if (Dist(ei[a], ej[b]) > 1e-8) continue;
                                 var ti = TangentAt(edges[i], ei[a]); var tj = TangentAt(edges[j], ej[b]);
-                                if (ti == null || tj == null || Math.Abs(Dot(ti, tj)) < 0.9999 || !SharesFace(edges[i], edges[j])) continue;
+                                if (ti == null || tj == null || Math.Abs(Dot(ti, tj)) < 0.9999 || !TangentFaces(edges[i], edges[j], ei[a])) continue;
                                 res[i].Join[a] = true; res[j].Join[b] = true;
                             }
                     }
@@ -67,7 +67,7 @@ namespace MfgChamfer
                         {
                             if (chain.Any(x => SameEdge(x, n))) continue;
                             var tn = TangentAt(n, pt);
-                            if (tn == null || Math.Abs(Dot(tc, tn)) < 0.9999 || !SharesFace(cur, n)) continue;
+                            if (tn == null || Math.Abs(Dot(tc, tn)) < 0.9999 || !TangentFaces(cur, n, pt)) continue;
                             chain.Add(n);
                         }
                     }
@@ -96,6 +96,26 @@ namespace MfgChamfer
             if (!c.IsCircle()) return null;
             var cp = (double[])c.CircleParams;
             return Norm(Cross(new[] { cp[3], cp[4], cp[5] }, Sub(V, new[] { cp[0], cp[1], cp[2] })));
+        }
+
+        // Native-style propagation: the edges share a face and their other faces run tangentially into each other at pt
+        // (same rule that keeps a straight edge from dragging in the collinear edge of a different wall).
+        static bool TangentFaces(IEdge a, IEdge b, double[] pt)
+        {
+            try
+            {
+                var fa = ((object[])a.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
+                var fb = ((object[])b.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
+                Func<IFace2, double[]> nrm = f => ((ISurface)f.GetSurface()).IsPlane() ? PlaneNormal(f) : FaceNormalAt(f, pt);
+                for (int x = 0; x < 2; x++) for (int y = 0; y < 2; y++)
+                    if (fa[x].IsSame(fb[y]))
+                    {
+                        IFace2 oa = fa[1 - x], ob = fb[1 - y];
+                        if (oa.IsSame(ob) || Dot(nrm(oa), nrm(ob)) > 0.9999) return true;
+                    }
+            }
+            catch { }
+            return false;
         }
 
         static bool SharesFace(IEdge a, IEdge b)
@@ -227,7 +247,16 @@ namespace MfgChamfer
                 // Ends that run into a wall: the mill stops tool radius + clearance short of it and leaves with a cone
                 for (int k = 0; k < 2; k++)
                 {
-                    if (blend != null && (blend.Join[k] || blend.End[k])) continue;   // continues into the next selected edge / ends in a blend corner
+                    if (blend != null && (blend.Join[k] || blend.End[k]))   // continues into the next selected edge / ends in a blend corner
+                    {
+                        if (blend.ConeEnd[k])   // flush at the corner, but closed with the mill's own runout cone
+                        {
+                            var rv0 = Norm(Sub(Sub(ends[k], c), Scale(up, Dot(Sub(ends[k], c), up))));
+                            var tv0 = Scale(Cross(up, rv0), dir);
+                            blk[k] = true; outD[k] = k == 0 ? Scale(tv0, -1) : tv0;
+                        }
+                        continue;
+                    }
                     var vtx = ends[k];
                     var rv = Norm(Sub(Sub(vtx, c), Scale(up, Dot(Sub(vtx, c), up))));
                     var tv = Scale(Cross(up, rv), dir);             // direction of travel along the arc at this end
@@ -295,7 +324,12 @@ namespace MfgChamfer
             double sp = span - st0 - st1;
             var list = new List<IBody2> { tool };
             for (int k = 0; k < 2; k++)
-                if (blk[k])   // reversed: the mill comes in square to the wall (5-axis), so its runout cone has a radial axis
+                if (blk[k] && blend != null && blend.ConeAxis[k] != null)   // corner cone around the normal of the plane of both edges (apex Size deep, radius Size x tan)
+                {
+                    var vtxc = ends[k]; var axc = blend.ConeAxis[k];
+                    list.Add(Cone(Add(vtxc, Scale(axc, p.Size)), axc, p.Size, Math.PI / 2 - p.Angle, 10 * Math.Max(p.Size, hB), modeler));
+                }
+                else if (blk[k])   // reversed: the mill comes in square to the wall (5-axis), so its runout cone has a radial axis
                 {
                     if (!flip) { list.Add(Cone(bAt(dir * (k == 0 ? st0 : span - st1)), Scale(up, -1), hB, beta, stop, modeler)); continue; }
                     double a = dir * (k == 0 ? st0 : span - st1);
@@ -306,7 +340,7 @@ namespace MfgChamfer
             double cot = 1 / Math.Tan(flip ? betaW : beta), hC = flip ? d1 * Math.Sin(phi) : hB;
             if (expected != null)
                 expected[0] = 0.5 * d1 * d2 * Math.Sin(phi) * (R + rhoA + rhoB) / 3 * sp
-                            + ((blk[0] ? 1 : 0) + (blk[1] ? 1 : 0)) * Math.PI * hC * hC * hC * cot * cot / 3;
+                            + Enumerable.Range(0, 2).Where(kk => blk[kk]).Sum(kk => blend != null && blend.ConeAxis[kk] != null ? Math.PI / 3 * p.Size * p.Size * p.Size * Math.Tan(p.Angle) * Math.Tan(p.Angle) : Math.PI * hC * hC * hC * cot * cot / 3);
             if (lines != null)
             {
                 bool full = span > 2 * Math.PI - 1e-6;
@@ -319,7 +353,7 @@ namespace MfgChamfer
                 }
                 for (int k = 0; k < 2; k++)
                 {
-                    if (!blk[k]) continue;
+                    if (!blk[k] || (blend != null && blend.ConeAxis[k] != null)) continue;
                     double ak = dir * (k == 0 ? st0 : span - st1);
                     var radk = Add(Scale(rq, Math.Cos(ak)), Scale(yq, Math.Sin(ak)));
                     var apex = flip ? Add(c, Scale(radk, rhoA)) : bAt(ak);

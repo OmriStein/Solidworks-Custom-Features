@@ -1,4 +1,4 @@
-// CNC Chamfer - SOLIDWORKS add-in that adds a "manufacturable chamfer" feature.
+﻿// CNC Chamfer - SOLIDWORKS add-in that adds a "manufacturable chamfer" feature.
 //
 // A 45 deg chamfer on straight 90 deg edges. Where an edge runs into a wall, the chamfer stops
 // (tool radius + clearance) short of the wall and ends in the conical runout a 90 deg chamfer mill
@@ -610,6 +610,8 @@ namespace MfgChamfer
         {
             public bool[] End = new bool[2];                     // start / end vertex is a blended corner
             public double[] ConeWall;                            // normal of the wall the blended rim runs into: a mill working from that wall is blocked by the floor instead
+            public double[][] ConeAxis = new double[2][];
+            public double[][] ConeDown = new double[2][];   // the way into the material below the rim's floor at that end (clips the corner cone to a quarter)        // arc ends: axis (into the material) of the corner cone, normal to the plane of both edges at the vertex
             public bool[] ConeEnd = new bool[2];                 // the end is flush at the vertex but still closes with the mill's own runout cone there
             public bool[] Join = new bool[2];                    // start / end vertex continues tangentially into another selected edge
             public double[] Axis;                                // tool axis (into the material) forced by the shared face
@@ -627,7 +629,7 @@ namespace MfgChamfer
                     {
                         IEdge ei = edges[i], ej = edges[j];
                         bool li = ((ICurve)ei.GetCurve()).IsLine(), lj = ((ICurve)ej.GetCurve()).IsLine();   // an arc may take the place of a line
-                        if ((!li && !((ICurve)ei.GetCurve()).IsCircle()) || (!lj && !((ICurve)ej.GetCurve()).IsCircle()) || (!li && !lj)) continue;
+                        if ((!li && !((ICurve)ei.GetCurve()).IsCircle()) || (!lj && !((ICurve)ej.GetCurve()).IsCircle())) continue;
                         var pi = Ends(ei);
                         var pj = Ends(ej);
                         int ai = -1, aj = -1;
@@ -649,6 +651,7 @@ namespace MfgChamfer
                         int ci = -1, cj = -1;
                         for (int a = 0; a < 2; a++) for (int b = 0; b < 2; b++) if (fi[a].IsSame(fj[b])) { ci = a; cj = b; }
                         Func<IFace2, double[]> wallN = f => ((ISurface)f.GetSurface()).IsPlane() ? PlaneNormal(f) : FaceNormalAt(f, V);
+                        if (ci >= 0 && !li && !lj) continue;   // two arcs only meet in the perpendicular (no shared face) case
                         if (ci < 0)
                         {
                             // No shared face: a rim edge (line or arc) whose face C is square to a straight edge rising from the
@@ -656,7 +659,7 @@ namespace MfgChamfer
                             for (int s = 0; s < 2; s++)
                             {
                                 int a = s == 0 ? i : j, b = s == 0 ? j : i;
-                                if (!(b == i ? li : lj)) continue;
+                                if (li != lj && !(b == i ? li : lj)) continue;   // an arc meeting a straight edge: the straight edge is the one rising from the arc's face (never the reverse, which would give the arc a second, vertical cone)
                                 var fa = a == i ? fi : fj; var fb = b == i ? fi : fj;
                                 var tA = a == i ? ti : tj; var tB = b == i ? ti : tj;
                                 int endA = a == i ? ai : aj, endB = b == i ? ai : aj;
@@ -664,13 +667,19 @@ namespace MfgChamfer
                                 {
                                     if (!((ISurface)fa[k].GetSurface()).IsPlane()) continue;
                                     var nCp = PlaneNormal(fa[k]);
-                                    if (Dot(tB, nCp) < 0.9999) continue;               // the straight edge rises square from C
+                                    if (Dot(tB, nCp) < 0.9) continue;                  // the edge rises from C, square or leaning (drafted wall, up to ~25 deg)
                                     var nAW = wallN(fa[1 - k]);
                                     if (nAW == null || Math.Abs(Dot(nCp, nAW)) > 0.02) continue;   // the rim is a 90 deg edge
                                     if (!fb.Any(f => { var nW = wallN(f); return nW != null && Math.Abs(Dot(nCp, nW)) < 0.02 && Dot(nW, tA) > 0.02; })) continue;   // the rim runs into one of its walls
                                     var axc = Scale(nCp, -1);
                                     if (res[a].Axis != null && Dot(res[a].Axis, axc) < 0.99) continue;
-                                    res[a].Axis = axc; res[a].End[endA] = true; res[b].End[endB] = true;
+                                    res[a].Axis = axc; res[a].End[endA] = true; res[b].End[endB] = true; res[b].ConeDown[endB] = axc;
+                                    // the corner cone is the mill that works from the plane both edges leave V in (B arc or leaning line)
+                                    {
+                                        var cx = Cross(nCp, tA);   // square to the rim and in the floor plane: with a leaning B this stays horizontal like the wall's own corner cut
+                                        var uC = Len(cx) > 1e-6 ? IntoFace(fa[k], nCp, tA, V, 1e-4) : null;
+                                        if (uC != null) { cx = Norm(cx); res[b].ConeAxis[endB] = Dot(cx, uC) >= 0 ? cx : Scale(cx, -1); }
+                                    }
                                     // the straight edge's mill stops with its centre at V: its cone (axis square to the wall) closes the chamfer there
                                     res[b].ConeEnd[endB] = true; res[b].ConeWall = fb.Select(wallN).FirstOrDefault(nW => nW != null && Math.Abs(Dot(nCp, nW)) < 0.02 && Dot(nW, tA) > 0.02);
                                     break;
@@ -809,6 +818,23 @@ namespace MfgChamfer
         {
             var box = f.GetBox() as double[];
             if (box == null) return false;
+            // A planar face lying in the plane of an original planar face is an old face (a non-convex top face has its
+            // UV middle outside the trimmed face, which wrongly marked it new and drew its outline yellow).
+            try
+            {
+                var sf = (ISurface)f.GetSurface();
+                if (sf.IsPlane())
+                {
+                    var pp = (double[])sf.PlaneParams; var n = Norm(new[] { pp[0], pp[1], pp[2] }); var r0 = new[] { pp[3], pp[4], pp[5] };
+                    foreach (var o in origFaces)
+                    {
+                        var so = (ISurface)o.GetSurface(); if (!so.IsPlane()) continue;
+                        var po = (double[])so.PlaneParams;
+                        if (Math.Abs(Dot(n, Norm(new[] { po[0], po[1], po[2] }))) > 0.999999 && Math.Abs(Dot(n, Sub(new[] { po[3], po[4], po[5] }, r0))) < 1e-7) return false;
+                    }
+                }
+            }
+            catch { }
             // interior point (UV middle): the box centre of a curved band is off the face, and its closest point lies on a shared edge
             double[] cp = null;
             try { var uv = f.GetUVBounds() as double[]; var ev = ((ISurface)f.GetSurface()).Evaluate((uv[0] + uv[1]) / 2, (uv[2] + uv[3]) / 2, 0, 0) as double[]; if (ev != null) cp = new[] { ev[0], ev[1], ev[2] }; } catch { }
@@ -910,6 +936,15 @@ namespace MfgChamfer
             if (blend.ConeWall != null) fromF1 = Dot(n1, blend.ConeWall) < 0.5;   // blended with a rim: the mill works from the face that continues below the corner
             var nF = fromF1 ? n1 : n2; var nG = fromF1 ? n2 : n1;
             var uF = fromF1 ? u1 : u2; var uG = fromF1 ? u2 : u1;
+            // blended with a rim at the floor: the chamfer legs are measured in the floor plane and swept along the edge, like the native corner
+            var dnH = blend.ConeDown[0] ?? blend.ConeDown[1];
+            bool horiz = dnH != null && (blend.ConeAxis[0] != null || blend.ConeAxis[1] != null);
+            double[] hzv = dnH != null ? Norm(dnH) : null;
+            if (horiz)
+            {
+                Func<double[], double[]> hproj = v => Norm(Sub(v, Scale(hzv, Dot(v, hzv))));
+                uF = hproj(uF); uG = hproj(uG);
+            }
             var axis = Scale(nF, -1);                                       // tool axis, pointing into the material
 
             double phi = Math.Acos(Math.Max(-1, Math.Min(1, Dot(uF, uG))));   // angle of the material wedge at the edge
@@ -940,7 +975,8 @@ namespace MfgChamfer
             {
                 double inside = Math.Max(0, Math.Min(s1, len) - Math.Max(s0, 0));
                 double aTri = 0.5 * d1 * d2 * Math.Sin(phi);
-                expected[0] = aTri * inside + ((k0 ? 1 : 0) + (k1 ? 1 : 0)) * ((k0 || k1) ? LugVolume(hB, beta, Dot(nF, nG)) : 0)
+                Func<int, bool, double> endVol = (k, on) => !on ? 0 : blend.ConeAxis[k] != null ? Math.PI / 3 * Math.Pow(Math.Max(d1, d2), 3) : LugVolume(hB, beta, Dot(nF, nG));
+                expected[0] = aTri * inside + endVol(0, k0) + endVol(1, k1)
                             + blend.Corners.Sum(c => (2 * Math.PI - c.Gamma) * d1 * d1 * hB / 6);   // the cone's share in the material (upper bound)
                 // Open ends: the tool runs on past the end (prism extended by ext). Usually that is air, but it may
                 // shave material the end meets at an angle (e.g. an existing chamfer) - a real run-off, not a wall.
@@ -962,10 +998,47 @@ namespace MfgChamfer
             }
 
             var list = new List<IBody2>();
-            list.Add(Prism(Add(p0, Scale(t, s0)), t, s1 - s0, Scale(uF, d1), Scale(uG, d2), Scale(Add(nF, nG), ext), uF, modeler, math));
+            if (horiz)   // profile on the floor plane, swept along the (leaning) edge: the band ends on the floor like the native chamfer
+            {
+                var up = Scale(hzv, -1); var nU = Dot(up, t) >= 0 ? up : hzv;
+                var cH = Scale(Add(nF, nG), ext); cH = Sub(cH, Scale(hzv, Dot(cH, hzv)));
+                list.Add(PrismSheared(Add(p0, Scale(t, s0)), nU, t, s1 - s0, Scale(uF, d1), Scale(uG, d2), cH, uF, modeler, math));
+            }
+            else
+                list.Add(Prism(Add(p0, Scale(t, s0)), t, s1 - s0, Scale(uF, d1), Scale(uG, d2), Scale(Add(nF, nG), ext), uF, modeler, math));
             Func<double, double[]> apexAt = s => Add(Add(p0, Scale(t, s)), Scale(uG, d2));   // the mill tip sits on the chamfer's bottom edge
-            if (k0) list.Add(Cone(apexAt(s0), axis, hB, beta, stop, modeler));
-            if (k1) list.Add(Cone(apexAt(s1), axis, hB, beta, stop, modeler));
+            // a rim blended into this edge ends it with the corner cone (axis square to the rim, in the floor plane), not the mill's own tilted one
+            Func<int, IBody2> endCone = k =>
+            {
+                var ca = blend.ConeAxis[k];
+                if (ca == null) return Cone(apexAt(k == 0 ? s0 : s1), axis, hB, beta, stop, modeler);
+                // the cone tangent to the chamfer plane along the line from its corner on F, with its apex on the axis through this end
+                var mb = Norm(Cross(t, Sub(Scale(uG, d2), Scale(uF, d1))));
+                double mc = Dot(mb, ca), sAx = Math.Abs(mc) > 0.2 ? d1 * Dot(mb, uF) / mc : -1;
+                double h = sAx > 1e-9 ? sAx : Math.Max(d1, d2), alpha = sAx > 1e-9 ? Math.Asin(Math.Min(1, Math.Abs(mc))) : beta;
+                var vk = Add(p0, Scale(t, k == 0 ? 0 : len));
+                var cone = Cone(Add(vk, Scale(ca, h)), ca, h, Math.PI / 2 - alpha, 10 * Math.Max(Math.Max(d1, d2), hB), modeler);
+                // only the quarter between the rim's end (into the wall) and below the floor is cut, like the native corner
+                var dn = blend.ConeDown[k]; var u1 = Math.Abs(Dot(uF, ca)) <= Math.Abs(Dot(uG, ca)) ? uF : uG;
+                if (dn != null)
+                {
+                    double L = 10 * Math.Max(Math.Max(d1, d2), hB);
+                    try
+                    {
+                        double eps = 5e-5;   // keep clear of the wall and floor planes the quarter would otherwise share with the part
+                        var o0 = Sub(Sub(Sub(vk, Scale(ca, L)), Scale(u1, eps)), Scale(dn, eps));
+                        var wedge = Prism(o0, ca, L + h + 1e-4, new double[3], Scale(u1, L), Scale(dn, L), u1, modeler, math);
+                        Func<IBody2, double> vol = b => ((double[])b.GetMassProperties(1))[3];
+                        double vc = vol(cone), vw = vol(wedge);
+                        int err = 0; var res = cone.Operations2(15901, wedge, out err) as object[];
+                        if (res != null && res.Length > 0 && res[0] is IBody2 && vol((IBody2)res[0]) < vc * 0.9999 && vol((IBody2)res[0]) > 0) return (IBody2)res[0];
+                    }
+                    catch { }
+                }
+                return cone;
+            };
+            if (k0) list.Add(endCone(0));
+            if (k1) list.Add(endCone(1));
             foreach (var c in blend.Corners) list.Add(Cone(Add(c.V, Scale(axis, hB)), axis, hB, beta, 10 * Math.Max(d1, hB), modeler));
             foreach (var f in blend.Flats) list.Add(FlatCornerTool(f, modeler, math));
             return list;
@@ -1087,6 +1160,20 @@ namespace MfgChamfer
         }
 
         // Triangle (A on face F, B on the other face, C outside), given as offsets from o, swept along the edge.
+        // Like Prism, but the profile lies in the plane with normal n through o and is swept along t (not square to the profile)
+        static IBody2 PrismSheared(double[] o, double[] n, double[] t, double len, double[] a, double[] b, double[] c, double[] refDir,
+                                   IModeler modeler, IMathUtility math)
+        {
+            a = Add(o, a); b = Add(o, b); c = Add(o, c);
+            var surf = (ISurface)modeler.CreatePlanarSurface2(o, n, refDir);
+            var curves = new[] { Seg(modeler, a, b), Seg(modeler, b, c), Seg(modeler, c, a) };
+            var sheet = surf.CreateTrimmedSheet4(curves, true) as IBody2;
+            if (sheet == null) throw new Exception("could not build chamfer profile");
+            var body = modeler.CreateExtrudedBody((Body2)sheet, (MathVector)math.CreateVector(t), len);
+            if (body == null) throw new Exception("could not sweep chamfer profile");
+            return body;
+        }
+
         static IBody2 Prism(double[] o, double[] t, double len, double[] a, double[] b, double[] c, double[] refDir,
                             IModeler modeler, IMathUtility math)
         {
