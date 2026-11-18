@@ -591,6 +591,8 @@ namespace MfgChamfer
         public class BlendInfo
         {
             public bool[] End = new bool[2];                     // start / end vertex is a blended corner
+            public double[] ConeWall;                            // normal of the wall the blended rim runs into: a mill working from that wall is blocked by the floor instead
+            public bool[] ConeEnd = new bool[2];                 // the end is flush at the vertex but still closes with the mill's own runout cone there
             public bool[] Join = new bool[2];                    // start / end vertex continues tangentially into another selected edge
             public double[] Axis;                                // tool axis (into the material) forced by the shared face
             public List<Corner> Corners = new List<Corner>();    // corner cones owned by this edge
@@ -628,9 +630,37 @@ namespace MfgChamfer
                         var fj = ((object[])ej.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
                         int ci = -1, cj = -1;
                         for (int a = 0; a < 2; a++) for (int b = 0; b < 2; b++) if (fi[a].IsSame(fj[b])) { ci = a; cj = b; }
-                        if (ci < 0) continue;                               // no shared face
-                        var nC = PlaneNormal(fi[ci]);
                         Func<IFace2, double[]> wallN = f => ((ISurface)f.GetSurface()).IsPlane() ? PlaneNormal(f) : FaceNormalAt(f, V);
+                        if (ci < 0)
+                        {
+                            // No shared face: a rim edge (line or arc) whose face C is square to a straight edge rising from the
+                            // same vertex (an arc rim of a floor running into a boss wall, with the boss's vertical edge standing on it).
+                            for (int s = 0; s < 2; s++)
+                            {
+                                int a = s == 0 ? i : j, b = s == 0 ? j : i;
+                                if (!(b == i ? li : lj)) continue;
+                                var fa = a == i ? fi : fj; var fb = b == i ? fi : fj;
+                                var tA = a == i ? ti : tj; var tB = b == i ? ti : tj;
+                                int endA = a == i ? ai : aj, endB = b == i ? ai : aj;
+                                for (int k = 0; k < 2; k++)
+                                {
+                                    if (!((ISurface)fa[k].GetSurface()).IsPlane()) continue;
+                                    var nCp = PlaneNormal(fa[k]);
+                                    if (Dot(tB, nCp) < 0.9999) continue;               // the straight edge rises square from C
+                                    var nAW = wallN(fa[1 - k]);
+                                    if (nAW == null || Math.Abs(Dot(nCp, nAW)) > 0.02) continue;   // the rim is a 90 deg edge
+                                    if (!fb.Any(f => { var nW = wallN(f); return nW != null && Math.Abs(Dot(nCp, nW)) < 0.02 && Dot(nW, tA) > 0.02; })) continue;   // the rim runs into one of its walls
+                                    var axc = Scale(nCp, -1);
+                                    if (res[a].Axis != null && Dot(res[a].Axis, axc) < 0.99) continue;
+                                    res[a].Axis = axc; res[a].End[endA] = true; res[b].End[endB] = true;
+                                    // the straight edge's mill stops with its centre at V: its cone (axis square to the wall) closes the chamfer there
+                                    res[b].ConeEnd[endB] = true; res[b].ConeWall = fb.Select(wallN).FirstOrDefault(nW => nW != null && Math.Abs(Dot(nCp, nW)) < 0.02 && Dot(nW, tA) > 0.02);
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                        var nC = PlaneNormal(fi[ci]);
                         var nA = wallN(fi[1 - ci]);
                         var nB = wallN(fj[1 - cj]);
                         if (nA == null || nB == null) continue;
@@ -643,7 +673,7 @@ namespace MfgChamfer
                         res[i].End[ai] = true; res[j].End[aj] = true;
                         (li ? res[i] : res[j]).Corners.Add(new Corner { V = V, DirA = Scale(ti, -1), DirB = Scale(tj, -1) });   // a straight edge owns the cone
                     }
-                    catch { }
+                    catch (Exception ex) { Log("blend search "+i+","+j+": "+ex.Message); }
                 }
             FindJoins(edges, res);
             if (flat) FindFlatCorners(edges, p, flipAt, res);
@@ -773,6 +803,25 @@ namespace MfgChamfer
                 double dx = q[0] - cp[0], dy = q[1] - cp[1], dz = q[2] - cp[2];
                 if (dx * dx + dy * dy + dz * dz < 1e-14) return false;
             }
+            // Tiny trimmed faces (slivers/triangles): the UV middle can fall outside the face. Try the centre of its
+            // own edge points, but only when that point really lies on the face (then it is a true interior point).
+            try
+            {
+                var ps = new List<double[]>();
+                foreach (IEdge e in (object[])f.GetEdges()) ps.AddRange(EdgePoints(e));
+                if (ps.Count > 0)
+                {
+                    var c = new[] { ps.Average(q => q[0]), ps.Average(q => q[1]), ps.Average(q => q[2]) };
+                    var onF = f.GetClosestPointOn(c[0], c[1], c[2]) as double[];
+                    if (onF != null && Dist(onF, c) < 1e-9)
+                        foreach (var o in origFaces)
+                        {
+                            var q = o.GetClosestPointOn(c[0], c[1], c[2]) as double[];
+                            if (q != null && Dist(q, c) < 1e-7) return false;
+                        }
+                }
+            }
+            catch { }
             return true;
         }
 
@@ -840,6 +889,7 @@ namespace MfgChamfer
             else fromF1 = f1.GetArea() >= f2.GetArea();
             if (flip) fromF1 = !fromF1;
             if (blend.Axis != null) fromF1 = Dot(n1, blend.Axis) < -0.5;   // blended: tool comes from the shared face
+            if (blend.ConeWall != null) fromF1 = Dot(n1, blend.ConeWall) < 0.5;   // blended with a rim: the mill works from the face that continues below the corner
             var nF = fromF1 ? n1 : n2; var nG = fromF1 ? n2 : n1;
             var uF = fromF1 ? u1 : u2; var uG = fromF1 ? u2 : u1;
             var axis = Scale(nF, -1);                                       // tool axis, pointing into the material
@@ -857,11 +907,13 @@ namespace MfgChamfer
                 throw new Exception(string.Format(CultureInfo.InvariantCulture, "tool diameter must be at least {0:0.###} mm for this chamfer", 2 * rF * 1000));
 
             double stop = p.ToolDia / 2 + p.Clearance;
-            bool b0 = !blend.End[0] && Blocked(v0, Scale(t, -1), n1, n2);
-            bool b1 = !blend.End[1] && Blocked(v1, t, n1, n2);
+            bool e0 = blend.End[0], e1 = blend.End[1];
+            bool b0 = !e0 && Blocked(v0, Scale(t, -1), n1, n2);
+            bool b1 = !e1 && Blocked(v1, t, n1, n2);
+            bool k0 = b0 || blend.ConeEnd[0], k1 = b1 || blend.ConeEnd[1];   // ends that close with a runout cone
             double ext = Math.Max(d1, d2);
-            double s0 = blend.End[0] || blend.Join[0] ? 0 : b0 ? stop : -ext;       // blended / joined ends run exactly to the corner / neighbour
-            double s1 = blend.End[1] || blend.Join[1] ? len : b1 ? len - stop : len + ext;
+            double s0 = e0 || blend.Join[0] ? 0 : b0 ? stop : -ext;       // blended / joined ends run exactly to the corner / neighbour
+            double s1 = e1 || blend.Join[1] ? len : b1 ? len - stop : len + ext;
             if (s1 - s0 < 1e-6)
                 throw new Exception(string.Format(CultureInfo.InvariantCulture,
                     "edge ({0:0.###} mm) too short for a {1:0.###} mm tool between walls", len * 1000, p.ToolDia * 1000));
@@ -870,11 +922,11 @@ namespace MfgChamfer
             {
                 double inside = Math.Max(0, Math.Min(s1, len) - Math.Max(s0, 0));
                 double aTri = 0.5 * d1 * d2 * Math.Sin(phi);
-                expected[0] = aTri * inside + ((b0 ? 1 : 0) + (b1 ? 1 : 0)) * ((b0 || b1) ? LugVolume(hB, beta, Dot(nF, nG)) : 0)
+                expected[0] = aTri * inside + ((k0 ? 1 : 0) + (k1 ? 1 : 0)) * ((k0 || k1) ? LugVolume(hB, beta, Dot(nF, nG)) : 0)
                             + blend.Corners.Sum(c => (2 * Math.PI - c.Gamma) * d1 * d1 * hB / 6);   // the cone's share in the material (upper bound)
                 // Open ends: the tool runs on past the end (prism extended by ext). Usually that is air, but it may
                 // shave material the end meets at an angle (e.g. an existing chamfer) - a real run-off, not a wall.
-                int open = (b0 || blend.End[0] || blend.Join[0] ? 0 : 1) + (b1 || blend.End[1] || blend.Join[1] ? 0 : 1);
+                int open = (b0 || e0 || blend.Join[0] ? 0 : 1) + (b1 || e1 || blend.Join[1] ? 0 : 1);
                 expected[0] += open * aTri * ext;
                 foreach (var f in blend.Flats)   // corner tetrahedron V-T1-T2-T3
                     expected[0] += 1.5 * Math.Abs(Dot(Sub(f[1], f[0]), Cross(Sub(f[2], f[0]), Sub(f[3], f[0])))) / 6;
@@ -887,15 +939,15 @@ namespace MfgChamfer
             }
             if (lines != null)
             {
-                PreviewLines(lines, p0, t, s0, s1, b0, b1, uF, uG, d2, phi, rF);
+                PreviewLines(lines, p0, t, s0, s1, k0, k1, uF, uG, d2, phi, rF);
                 foreach (var c in blend.Corners) CornerLines(lines, c, axis, p.Size, hB);
             }
 
             var list = new List<IBody2>();
             list.Add(Prism(Add(p0, Scale(t, s0)), t, s1 - s0, Scale(uF, d1), Scale(uG, d2), Scale(Add(nF, nG), ext), uF, modeler, math));
             Func<double, double[]> apexAt = s => Add(Add(p0, Scale(t, s)), Scale(uG, d2));   // the mill tip sits on the chamfer's bottom edge
-            if (b0) list.Add(Cone(apexAt(s0), axis, hB, beta, stop, modeler));
-            if (b1) list.Add(Cone(apexAt(s1), axis, hB, beta, stop, modeler));
+            if (k0) list.Add(Cone(apexAt(s0), axis, hB, beta, stop, modeler));
+            if (k1) list.Add(Cone(apexAt(s1), axis, hB, beta, stop, modeler));
             foreach (var c in blend.Corners) list.Add(Cone(Add(c.V, Scale(axis, hB)), axis, hB, beta, 10 * Math.Max(d1, hB), modeler));
             foreach (var f in blend.Flats) list.Add(FlatCornerTool(f, modeler, math));
             return list;
@@ -1287,7 +1339,7 @@ namespace MfgChamfer
                 "Straight outside edges to chamfer. Highlight an edge in the list and tick Reverse direction to machine it from its other face.");
             ((IPropertyManagerPageControl)sel).SetStandardPictureLabel((int)swControlBitmapLabelType_e.swBitmapLabel_SelectEdge);
             sel.SingleEntityOnly = false;
-            sel.Height = 50;
+            sel.Height = 36;
             sel.Mark = 1;
             sel.SetSelectionFilters(new[] { (int)swSelectType_e.swSelEDGES });
             var flipBtn = (IPropertyManagerPageBitmapButton)g1.AddControl2(IdFlip,
@@ -1298,7 +1350,7 @@ namespace MfgChamfer
             try   // under the selection icon, left of the list (the group below is laid out from this button, so the list is kept short)
             {
                 var fc = (IPropertyManagerPageControl)flipBtn; var sc = (IPropertyManagerPageControl)sel;
-                fc.Left = 4; fc.Top = (short)(sc.Top + 28);
+                fc.Left = 4; fc.Top = (short)(sc.Top + 22);
             }
             catch (Exception ex) { Engine.Log("flip button place: " + ex.Message); }
             keep.Add(flipBtn);   // a control whose wrapper is collected stops responding (the button vanished)
@@ -1499,6 +1551,10 @@ namespace MfgChamfer
             var list = SelectedEdges();
             int item = CurrentItem(list.Count, true);
             if (item < 0) return;
+            if (list.Count > 1 && value == null)   // an edge in a blend has only one valid direction: nothing to reverse
+            {
+                try { var bl = Engine.FindBlends(list, p, p.Blend, p.Flat, k => FlipOf(list[k])); if (bl[item].Axis != null || bl[item].End[0] || bl[item].End[1]) return; } catch { }
+            }
             var key = Key(list[item]);
             flips[key] = value ?? !FlipOf(list[item]);
             UpdatePreview();
