@@ -55,31 +55,7 @@ namespace MfgChamfer
         }
 
         // Replaces the whole parameter set (also upgrades features made with older versions)
-        public void Write(IMacroFeatureData d)
-        {
-            // Set by name (SetParameters alone was not picked up by ModifyDefinition).
-            // Features from older versions have no "Flips" parameter yet: then redefine the whole set.
-            string probe, probe2, probe3, probe4, probe5;
-            d.GetStringByName("Flips", out probe);
-            d.GetStringByName("Blend", out probe2);
-            d.GetStringByName("Corner", out probe3);
-            d.GetStringByName("Edges", out probe4);
-            d.GetStringByName("Tangent", out probe5);
-            double probeA; d.GetDoubleByName("Angle", out probeA);
-            bool hasTip = false;
-            try { object nm, ty, vl; d.GetParameters(out nm, out ty, out vl); var na = nm as Array; if (na != null) foreach (var o in na) if ("TipOffset".Equals(o)) hasTip = true; } catch { }
-            if (probe == null || probe2 == null || probe3 == null || probe4 == null || probe5 == null || probeA <= 0 || !hasTip) d.SetParameters(Names, Types, Values());
-            d.SetDoubleByName("Size", Size);
-            d.SetDoubleByName("ToolDia", ToolDia);
-            d.SetDoubleByName("Clearance", Clearance);
-            d.SetStringByName("Flips", Flips ?? "");
-            d.SetStringByName("Blend", Blend ? "1" : "0");
-            d.SetStringByName("Corner", Flat ? "1" : "0");
-            d.SetStringByName("Edges", Edges ?? "");
-            d.SetDoubleByName("Angle", Angle);
-            d.SetDoubleByName("TipOffset", TipOffset);
-            d.SetStringByName("Tangent", Tangent ? "1" : "0");
-        }
+        public void Write(IMacroFeatureData d) { ParamIO.Write(d, Names, Types, Values()); }
 
         public static ChamferParams Read(IMacroFeatureData d)
         {
