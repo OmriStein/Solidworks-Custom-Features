@@ -8,5 +8,6 @@ net session >nul 2>&1 || (
 cd /d "%~dp0"
 set RA=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe
 if exist out\CustomFeatures.dll ("%RA%" /nologo /unregister out\CustomFeatures.dll) else (echo out\CustomFeatures.dll not found.)
+rd /s /q "%LOCALAPPDATA%\CustomFeatures" 2>nul
 echo Uninstalled.
 if /i not "%1"=="/q" pause

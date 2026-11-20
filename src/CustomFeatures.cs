@@ -150,12 +150,28 @@ namespace MfgChamfer
         int cookie;
         static readonly int Part = (int)swDocumentTypes_e.swDocPART;
 
+        // The icons are embedded in the DLL (resource "icons.<name>"); SOLIDWORKS only takes file paths, so they are copied to a per-user cache folder.
         public static string IconDir
         {
-            get { return Path.Combine(Path.GetDirectoryName(typeof(Addin).Assembly.Location), "icons"); }
+            get { return Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "CustomFeatures", "icons"); }
         }
 
-        public static string Icon(string name) { return Path.Combine(IconDir, name); }
+        public static string Icon(string name)
+        {
+            var path = Path.Combine(IconDir, name);
+            try
+            {
+                using (var s = typeof(Addin).Assembly.GetManifestResourceStream("icons." + name))
+                {
+                    if (s == null) return path;
+                    var data = new byte[s.Length]; int n = 0;
+                    while (n < data.Length) n += s.Read(data, n, data.Length - n);
+                    if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(data)) { Directory.CreateDirectory(IconDir); File.WriteAllBytes(path, data); }
+                }
+            }
+            catch { }   // a locked cache file keeps its old icon
+            return path;
+        }
 
         public bool ConnectToSW(object ThisSW, int Cookie)
         {
@@ -400,7 +416,6 @@ namespace MfgChamfer
         public static void Register(Type t)
         {
             string id = "{" + t.GUID.ToString().ToUpper() + "}";
-            string asmDir = Path.GetDirectoryName(t.Assembly.Location);
             RegistryKey k;
             try { k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\SolidWorks\Addins\" + id); }
             catch { k = Registry.CurrentUser.CreateSubKey(@"Software\SolidWorks\Addins\" + id); }
@@ -409,7 +424,7 @@ namespace MfgChamfer
                 k.SetValue(null, 0, RegistryValueKind.DWord);
                 k.SetValue("Title", AddinTitle);
                 k.SetValue("Description", "Custom features for SOLIDWORKS (Insert > Custom-Features): CNC Chamfer");
-                k.SetValue("Icon Path", Path.Combine(asmDir, @"icons\addin_16.png"));
+                k.SetValue("Icon Path", Icon("addin_16.png"));
             }
             using (var s = Registry.CurrentUser.CreateSubKey(@"Software\SolidWorks\AddInsStartup\" + id))
                 s.SetValue(null, 1, RegistryValueKind.DWord);
