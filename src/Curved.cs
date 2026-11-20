@@ -188,13 +188,15 @@ namespace MfgChamfer
                 d2 = d1; d1 = d2 * Math.Sin(beta) / Math.Sin(phi + beta);
                 beta = Math.Atan2(d2 * Math.Sin(phi), d1 - d2 * Math.Cos(phi));
             }
-            double hB = d2 * Math.Sin(phi), rF = flip ? d1 * Math.Sin(phi) / Math.Tan(betaW) : hB / Math.Tan(beta);
+            double hB = d2 * Math.Sin(phi), tip = flip ? 0 : p.TipOffset;   // the tip offset is not applied to reversed edges
+            double rF = flip ? d1 * Math.Sin(phi) / Math.Tan(betaW) : (hB + tip) / Math.Tan(beta);
             if (p.ToolDia / 2 < rF - 1e-9)
                 throw new Exception(string.Format(CultureInfo.InvariantCulture, "tool diameter must be at least {0:0.###} mm for this chamfer", 2 * rF * 1000));
 
             // Half-plane through the axis (rho = distance from the axis, z along up, z = 0 in the planar face):
             // chamfer line from A (on the face) to B (on the cone / cylinder).
-            double s = Dot(uP, rq) > 0 ? 1 : -1;               // +1: the planar face lies outside the circle (hole rim), -1: inside (boss)
+            var rqm = Norm(Sub(Sub(qm, c), Scale(up, Dot(Sub(qm, c), up))));   // radial direction where the faces were probed (the arc's middle): an arc over 180 deg has its start on the other side
+            double s = Dot(uP, rqm) > 0 ? 1 : -1;               // +1: the planar face lies outside the circle (hole rim), -1: inside (boss)
             double rhoA = R + s * d1, rhoB = R + s * d2 * Math.Cos(phi), zB = -hB;
             if (rhoA < 1e-4 || rhoB < 1e-4) throw new Exception("circle too small for this chamfer");
             Func<double, double> rho = z => rhoB + (rhoA - rhoB) * (z - zB) / (0 - zB);
@@ -224,6 +226,8 @@ namespace MfgChamfer
             var blk = new bool[2];
             var outD = new double[2][];
             Func<double, double[]> bAt = a => Add(Add(c, Scale(up, zB)), Add(Scale(rq, rhoB * Math.Cos(a)), Scale(yq, rhoB * Math.Sin(a))));   // mill tip at arc angle a
+            double rhoT = rhoB - s * tip / Math.Tan(beta);      // with a tip offset the apex slides along the extended chamfer line: away from the wall, into the air
+            Func<double, double[]> bTip = a => Add(Add(c, Scale(up, zB - tip)), Add(Scale(rq, rhoT * Math.Cos(a)), Scale(yq, rhoT * Math.Sin(a))));
             if (Dist(ends[0], ends[1]) > 1e-9)                  // an arc: keep only its sector
             {
                 // a point in the middle of the arc: on the bisector of its end radii, on whichever side lies on the edge
@@ -249,6 +253,7 @@ namespace MfgChamfer
                 {
                     if (blend != null && (blend.Join[k] || blend.End[k]))   // continues into the next selected edge / ends in a blend corner
                     {
+                        if (blend.End[k] && blend.EndShift[k] > 0) { if (k == 0) st0 = blend.EndShift[k]; else st1 = blend.EndShift[k]; }   // a tip offset: the mill axis turns the corner a little before the vertex
                         if (blend.ConeEnd[k])   // flush at the corner, but closed with the mill's own runout cone
                         {
                             var rv0 = Norm(Sub(Sub(ends[k], c), Scale(up, Dot(Sub(ends[k], c), up))));
@@ -280,7 +285,7 @@ namespace MfgChamfer
                     }
                     if (wn == null) continue;
                     int kk = k;
-                    Func<double, double> D = u => Dot(Sub(bAt(dir * (kk == 0 ? u : span - u)), vtx), wn);   // clearance of the mill axis from the wall after walking u inwards
+                    Func<double, double> D = u => Dot(Sub(bTip(dir * (kk == 0 ? u : span - u)), vtx), wn);   // clearance of the mill axis from the wall after walking u inwards
                     double u0 = -1, prev = 0;
                     const int steps = 720;
                     for (int i = 1; i <= steps && u0 < 0; i++)
@@ -327,23 +332,27 @@ namespace MfgChamfer
                 if (blk[k] && blend != null && blend.ConeAxis[k] != null)   // corner cone around the normal of the plane of both edges (apex Size deep, radius Size x tan)
                 {
                     var vtxc = ends[k]; var axc = blend.ConeAxis[k];
-                    list.Add(Cone(Add(vtxc, Scale(axc, d1)), axc, d1, Math.PI / 2 - beta, 10 * Math.Max(d1, hB), modeler));
+                    
+                    if (blend.ConeShift[k] == null) list.Add(Cone(Add(vtxc, Scale(axc, d1)), axc, d1, Math.PI / 2 - beta, 10 * Math.Max(d1, hB), modeler));   // the nominal corner cone (with a tip offset only the slid one)
+                    var dsc = blend.ConeShift[k];   // tip offset: plus the cone slid along the line where the two chamfer planes meet (the cutout grows with the bigger cutting edge)
+                    if (dsc != null) { double hcc = d1 + Dot(dsc, axc); if (hcc > 1e-6) list.Add(Cone(Add(Add(vtxc, Scale(axc, d1)), dsc), axc, hcc, Math.PI / 2 - beta, 10 * Math.Max(d1 + Len(dsc), hB), modeler)); }
                 }
                 else if (blk[k])   // reversed: the mill comes in square to the wall (5-axis), so its runout cone has a radial axis
                 {
-                    if (!flip) { list.Add(Cone(bAt(dir * (k == 0 ? st0 : span - st1)), Scale(up, -1), hB, beta, stop, modeler)); continue; }
+                    if (!flip) { list.Add(Cone(bTip(dir * (k == 0 ? st0 : span - st1)), Scale(up, -1), hB + tip, beta, stop, modeler)); continue; }
                     double a = dir * (k == 0 ? st0 : span - st1);
                     var rad = Add(Scale(rq, Math.Cos(a)), Scale(yq, Math.Sin(a)));
                     list.Add(Cone(Add(c, Scale(rad, rhoA)), Scale(rad, s), d1 * Math.Sin(phi), betaW, stop, modeler));
                 }
             // Pappus: triangle area x path length of its centroid; plus (an upper bound for) each runout cone
-            double cot = 1 / Math.Tan(flip ? betaW : beta), hC = flip ? d1 * Math.Sin(phi) : hB;
+            double cot = 1 / Math.Tan(flip ? betaW : beta), hC = flip ? d1 * Math.Sin(phi) : hB + tip;
             if (expected != null)
                 expected[0] = 0.5 * d1 * d2 * Math.Sin(phi) * (R + rhoA + rhoB) / 3 * sp
-                            + Enumerable.Range(0, 2).Where(kk => blk[kk]).Sum(kk => blend != null && blend.ConeAxis[kk] != null ? Math.PI / 3 * d1 * d1 * d1 * Math.Tan(beta) * Math.Tan(beta) : Math.PI * hC * hC * hC * cot * cot / 3);
+                            + Enumerable.Range(0, 2).Where(kk => blk[kk]).Sum(kk => blend != null && blend.ConeAxis[kk] != null ? Math.PI / 3 * Math.Pow(d1 + (blend != null && blend.ConeShift[kk] != null ? Len(blend.ConeShift[kk]) : 0), 3) * Math.Tan(beta) * Math.Tan(beta) : Math.PI * hC * hC * hC * cot * cot / 3);
             if (lines != null)
             {
                 bool full = span > 2 * Math.PI - 1e-6;
+                Func<double[], bool> outsideArc = x => { var dx = Sub(x, c); double ro = Len(Sub(dx, Scale(up, Dot(dx, up)))); return flip ? Dot(dx, up) > 1e-7 : s * (R - ro) > 1e-7; };   // not in the part: past the cylinder / cone, or above the planar face
                 int gens = (int)Math.Max(2, Math.Ceiling(sp / (Math.PI / 6)));
                 for (int k = 0; k <= gens; k++)
                 {
@@ -353,19 +362,30 @@ namespace MfgChamfer
                 }
                 for (int k = 0; k < 2; k++)
                 {
-                    if (!blk[k] || (blend != null && blend.ConeAxis[k] != null)) continue;
+if (!blk[k]) continue;
+                    if (blend != null && blend.ConeAxis[k] != null)   // the corner cone that closes a rim blend: its real shape
+                    {
+                        var axw = blend.ConeAxis[k]; var vtw = ends[k];
+                        double[] u1w = blend.ConeWall == null ? null : Sub(Scale(blend.ConeWall, -1), Scale(axw, Dot(Scale(blend.ConeWall, -1), axw)));
+                        
+                        var dsw = new double[3];   // the nominal cone; the slid one is drawn after it
+                        double hw = d1 + Dot(dsw, axw); if (hw < 1e-6) { hw = d1; dsw = new double[3]; }
+                        if (blend.ConeShift[k] == null) ConeLines(lines, Add(Add(vtw, Scale(axw, d1)), dsw), vtw, hw * Math.Tan(beta), axw, u1w != null && Len(u1w) > 1e-6 ? Norm(u1w) : null, blend.ConeDown[k], RimCornerOutside(vtw, blend.ConeDown[k], blend.ConeGeom[k]));
+                        if (blend.ConeShift[k] != null) { var dsl = blend.ConeShift[k]; double hw2 = d1 + Dot(dsl, axw); if (hw2 > 1e-6) ConeLines(lines, Add(Add(vtw, Scale(axw, d1)), dsl), vtw, hw2 * Math.Tan(beta), axw, u1w != null && Len(u1w) > 1e-6 ? Norm(u1w) : null, blend.ConeDown[k], RimCornerOutside(vtw, blend.ConeDown[k], blend.ConeGeom[k])); }
+                        continue;
+                    }
                     double ak = dir * (k == 0 ? st0 : span - st1);
                     var radk = Add(Scale(rq, Math.Cos(ak)), Scale(yq, Math.Sin(ak)));
-                    var apex = flip ? Add(c, Scale(radk, rhoA)) : bAt(ak);
+                    var apex = flip ? Add(c, Scale(radk, rhoA)) : bTip(ak);
                     var axk = flip ? Scale(radk, -s) : up;   // base side: opposite the axis passed to Cone
-                    var zc = Add(apex, Scale(axk, flip ? d1 * Math.Sin(phi) : hB));   // the cone's base circle
+                    var zc = Add(apex, Scale(axk, flip ? d1 * Math.Sin(phi) : hB + tip));   // the cone's base circle
                     var perp = Cross(axk, outD[k]);
                     Func<double, double[]> rim = th => Add(zc, Add(Scale(outD[k], rF * Math.Cos(th)), Scale(perp, rF * Math.Sin(th))));
                     const int segs = 16;
                     for (int i = 0; i < segs; i++)
-                        lines.Add(new[] { rim(-Math.PI / 2 + Math.PI * i / segs), rim(-Math.PI / 2 + Math.PI * (i + 1) / segs) });
+                        AddClippedFn(lines, rim(-Math.PI / 2 + Math.PI * i / segs), rim(-Math.PI / 2 + Math.PI * (i + 1) / segs), outsideArc);
                     for (int i = 0; i <= 4; i++)
-                        lines.Add(new[] { apex, rim(-Math.PI / 2 + Math.PI * i / 4) });
+                        AddClippedFn(lines, apex, rim(-Math.PI / 2 + Math.PI * i / 4), outsideArc);
                 }
             }
             return list;

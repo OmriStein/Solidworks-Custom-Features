@@ -39,9 +39,11 @@ namespace MfgChamfer
         public double Angle = Math.PI / 4; // chamfer angle from the face the mill comes from (rad); a 3-axis mill then has 180 deg - 2 x this
         
 
+        public double TipOffset;           // the mill's apex sits this far (m, along the axis) below the chamfer's lower edge: the chamfer plane moves in by it
+
         public bool FlipAt(int i) { return i < Flips.Length && Flips[i] == '1'; }
 
-        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner", "Edges", "Angle", "Tangent" };
+        public static readonly string[] Names = { "Size", "ToolDia", "Clearance", "Flips", "Blend", "Corner", "Edges", "Angle", "Tangent", "TipOffset" };
         public static readonly int[] Types =
         {
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
@@ -52,13 +54,14 @@ namespace MfgChamfer
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
             (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble,
-            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString,
+            (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeDouble
         };
 
         public string[] Values()
         {
             var c = CultureInfo.InvariantCulture;
-            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0", Edges ?? "", Angle.ToString("R", c), Tangent ? "1" : "0" };
+            return new[] { Size.ToString("R", c), ToolDia.ToString("R", c), Clearance.ToString("R", c), Flips ?? "", Blend ? "1" : "0", Flat ? "1" : "0", Edges ?? "", Angle.ToString("R", c), Tangent ? "1" : "0", TipOffset.ToString("R", c) };
         }
 
         // Replaces the whole parameter set (also upgrades features made with older versions)
@@ -73,7 +76,9 @@ namespace MfgChamfer
             d.GetStringByName("Edges", out probe4);
             d.GetStringByName("Tangent", out probe5);
             double probeA; d.GetDoubleByName("Angle", out probeA);
-            if (probe == null || probe2 == null || probe3 == null || probe4 == null || probe5 == null || probeA <= 0) d.SetParameters(Names, Types, Values());
+            bool hasTip = false;
+            try { object nm, ty, vl; d.GetParameters(out nm, out ty, out vl); var na = nm as Array; if (na != null) foreach (var o in na) if ("TipOffset".Equals(o)) hasTip = true; } catch { }
+            if (probe == null || probe2 == null || probe3 == null || probe4 == null || probe5 == null || probeA <= 0 || !hasTip) d.SetParameters(Names, Types, Values());
             d.SetDoubleByName("Size", Size);
             d.SetDoubleByName("ToolDia", ToolDia);
             d.SetDoubleByName("Clearance", Clearance);
@@ -82,6 +87,7 @@ namespace MfgChamfer
             d.SetStringByName("Corner", Flat ? "1" : "0");
             d.SetStringByName("Edges", Edges ?? "");
             d.SetDoubleByName("Angle", Angle);
+            d.SetDoubleByName("TipOffset", TipOffset);
             d.SetStringByName("Tangent", Tangent ? "1" : "0");
         }
 
@@ -99,7 +105,8 @@ namespace MfgChamfer
             string co; d.GetStringByName("Corner", out co); p.Flat = co == "1";
             string ed; d.GetStringByName("Edges", out ed); p.Edges = ed ?? "";
             string tg; d.GetStringByName("Tangent", out tg); p.Tangent = tg == "1";
-            d.GetDoubleByName("Angle", out v); if (v > 0.01 && v < 1.56) p.Angle = v;   // missing (older features) = 45 deg
+            d.GetDoubleByName("Angle", out v); if (v > 0.01 && v < 1.56) p.Angle = v;
+            v = 0; d.GetDoubleByName("TipOffset", out v); if (v > 0) p.TipOffset = v;   // missing (older features) = 0   // missing (older features) = 45 deg
             return p;
         }
 
@@ -605,9 +612,12 @@ namespace MfgChamfer
         // block each other (inside corner on C, e.g. a step wall meeting the floor). The chamfer mill comes in
         // normal to C and turns around the corner: both chamfers run right up to the vertex and a full cone there
         // (axis normal to C, apex at chamfer depth) rounds the chamfer line on C with radius = chamfer size.
-        public class Corner { public double[] V, DirA, DirB; public double Gamma { get { return Math.Acos(Math.Max(-1, Math.Min(1, Dot(DirA, DirB)))); } } }   // Gamma: angle between the two edges   // DirA/DirB: from V into the material, along each edge's line
+        public class Corner { public double[] V, DirA, DirB, NA, NB, V2; public bool Shifted; public double Gamma { get { return Math.Acos(Math.Max(-1, Math.Min(1, Dot(DirA, DirB)))); } } }   // Gamma: angle between the two edges   // DirA/DirB: from V into the material, along each edge's line
         public class BlendInfo
         {
+            public double[][][] ConeGeom = new double[2][][];             // rim blends: {rim wall normal, the two wall normals of the rising edge} (clips the corner cone's preview to the part)
+            public double[][] ConeShift = new double[2][];                // rim blends with a tip offset: how far the corner cone slides from its nominal place
+            public double[] EndShift = new double[2];                   // how far from that end the mill axis stops: V itself, or the turning point V2 with a tip offset
             public bool[] End = new bool[2];                     // start / end vertex is a blended corner
             public double[] ConeWall;                            // normal of the wall the blended rim runs into: a mill working from that wall is blocked by the floor instead
             public double[][] ConeAxis = new double[2][];
@@ -683,6 +693,50 @@ namespace MfgChamfer
                                     }
                                     // the straight edge's mill stops with its centre at V: its cone (axis square to the wall) closes the chamfer there
                                     res[b].ConeEnd[endB] = true; res[b].ConeWall = fb.Select(wallN).FirstOrDefault(nW => nW != null && Math.Abs(Dot(nCp, nW)) < 0.02 && Dot(nW, tA) > 0.02);
+                                    res[b].ConeGeom[endB] = new[] { nAW, wallN(fb[0]), wallN(fb[1]) };
+                                    if (p.TipOffset > 0 && !(li && lj)) throw new Exception("tip offset is not available at a corner where an arc runs into a wall - set it to 0 or deselect that corner");
+                                    if (p.TipOffset > 0)
+                                    {   // the corner cone slides along the line where the chamfer planes of the rim (A) and of the rising edge (B) meet: it stays tangent to both
+                                        bool bLine = b == i ? li : lj, aLine = a == i ? li : lj;
+                                        var faceB = fb.FirstOrDefault(f => bLine ? Dot(wallN(f), res[b].ConeWall) < 0.5 : ((ISurface)f.GetSurface()).IsPlane());
+                                        var faceBo = faceB == null ? null : fb.FirstOrDefault(f => !f.IsSame(faceB));
+                                        var nPiA = ChamferPlaneN(fa[k], fa[1 - k], V, tA, p, null);
+                                        var nPiB = faceB == null || faceBo == null ? null : ChamferPlaneN(faceB, faceBo, V, tB, p, bLine ? axc : null);
+                                        var caxB = res[b].ConeAxis[endB];
+                                        if (nPiA != null && nPiB != null && caxB != null && Len(Cross(nPiA, nPiB)) > 1e-6)
+                                        {
+                                            var mm = Norm(Cross(nPiA, nPiB)); double dm = Dot(mm, caxB);
+                                            if (Math.Abs(dm) > 0.1)
+                                            {
+                                                var dsh = Scale(mm, p.TipOffset / dm); res[b].ConeShift[endB] = dsh;
+                                                double shA = Dot(dsh, tA), shB = Dot(dsh, tB);
+                                                Log(string.Format(CultureInfo.InvariantCulture, "rim blend offset: shift ({0:0.000},{1:0.000},{2:0.000}) mm, along rim {3:0.000}, along rising edge {4:0.000}", dsh[0] * 1000, dsh[1] * 1000, dsh[2] * 1000, shA * 1000, shB * 1000));
+                                                // physical, like the straight-to-straight corner: the rim and the rising edge stop where the slid cone touches them (the mill axis turns the corner there); the nominal corner cone is dropped
+                                                Func<int, bool, double, double> toEnd = (e, isLine, dist) => { double dd = Math.Max(0, dist); return isLine ? dd : dd / ((double[])((ICurve)edges[e].GetCurve()).CircleParams)[6]; };
+                                                // where the edge's tip path (apex line, o deeper in its chamfer plane) meets the generator along which the slid cone touches that plane
+                                                var Q0 = Add(V, Scale(caxB, p.Size));   // the nominal corner cone's apex
+                                                Func<double[], double[], double[], double[], double[], double> sStop = (nPi, t, ax, nf1, nf2) =>
+                                                {
+                                                    var u = Cross(nPi, t); if (Len(u) < 1e-9) return double.NaN; u = Norm(u);
+                                                    double du = Dot(u, ax); if (Math.Abs(du) < 0.1) return double.NaN; if (du < 0) { u = Scale(u, -1); du = -du; }
+                                                    var w = Sub(dsh, Scale(u, p.TipOffset / du));
+                                                    var pa = Sub(caxB, Scale(nPi, Dot(nPi, caxB))); var ct = Cross(t, pa); double c2 = Dot(ct, ct); if (c2 < 1e-12) return double.NaN;
+                                                    double sv = Dot(Sub(Q0, V), t) + Dot(Cross(w, pa), ct) / c2;   // station along the edge where its tip path meets the contact generator
+                                                    var apx = Add(Q0, dsh);
+                                                    foreach (var nf in new[] { nf1, nf2 })   // the generator is slanted across the band: reach where it meets each face, so no ledge is left at the band's edges
+                                                    {
+                                                        if (nf == null) continue; double dn2 = Dot(pa, nf); if (Math.Abs(dn2) < 1e-6) continue;
+                                                        double st = Dot(Sub(Add(apx, Scale(pa, -Dot(Sub(apx, V), nf) / dn2)), V), t); if (st > 1e-9 && st < sv) sv = st;
+                                                    }
+                                                    return sv;
+                                                };
+                                                double sA = sStop(nPiA, tA, axc, wallN(fa[k]), wallN(fa[1 - k])); var axBn = faceB != null ? wallN(faceB) : null; double sB = axBn != null ? sStop(nPiB, tB, Scale(axBn, -1), axBn, wallN(faceBo)) : double.NaN;   // the rising edge mills square to its own face
+                                                Log(string.Format(CultureInfo.InvariantCulture, "rim blend stops: A old {0:0.000} new {1:0.000}, B old {2:0.000} new {3:0.000} mm", shA * 1000, sA * 1000, shB * 1000, sB * 1000));
+                                                res[a].EndShift[endA] = toEnd(a, aLine, double.IsNaN(sA) ? shA : sA); res[b].EndShift[endB] = toEnd(b, bLine, double.IsNaN(sB) ? shB : sB);
+                                                
+                                            }
+                                        }
+                                    }
                                     break;
                                 }
                             }
@@ -699,8 +753,39 @@ namespace MfgChamfer
                             continue;                                       // already blended on a different face
                         res[i].Axis = axis; res[j].Axis = axis;
                         res[i].End[ai] = true; res[j].End[aj] = true;
-                        (li ? res[i] : res[j]).Corners.Add(new Corner { V = V, DirA = Scale(ti, -1), DirB = Scale(tj, -1) });   // a straight edge owns the cone
+                        var corner = new Corner { V = V, DirA = Scale(ti, -1), DirB = Scale(tj, -1), NA = nA, NB = nB, V2 = V };   // NA / NB: outward normals of the two walls (in the plane of C)
+                        if (li && lj && p.TipOffset > 0 && 1 + Dot(nA, nB) > 0.05)
+                        {   // with a tip offset the mill axis stays offset/tan(angle) outside each wall: it turns the corner at V2, outside both
+                            double kk = p.TipOffset / Math.Tan(p.Angle) / (1 + Dot(nA, nB));
+                            corner.V2 = Add(V, Scale(Add(nA, nB), kk)); corner.Shifted = true;
+                            res[i].EndShift[ai] = kk * Dot(nB, ti); res[j].EndShift[aj] = kk * Dot(nA, tj);
+                        }
+                        if (!corner.Shifted && li != lj && p.TipOffset > 0)
+                        {   // an arc and a straight edge: the offset circle of the arc meets the offset line of the straight edge at V2
+                            double del = p.TipOffset / Math.Tan(p.Angle);
+                            int ia = li ? j : i, il = li ? i : j, ea = li ? aj : ai, el = li ? ai : aj;
+                            var cpA = (double[])((ICurve)edges[ia].GetCurve()).CircleParams;
+                            var cA = new[] { cpA[0], cpA[1], cpA[2] }; double Ra = cpA[6];
+                            var nLine = li ? nA : nB; var nArc = li ? nB : nA; var tLine = li ? ti : tj;
+                            var radV = Norm(Sub(Norm(Sub(V, cA)), Scale(nC, Dot(Norm(Sub(V, cA)), nC))));
+                            double rhoT = Ra + del * Dot(nArc, radV);
+                            var w0 = Sub(Add(V, Scale(nLine, del)), cA);
+                            double bq = Dot(w0, tLine), disc = bq * bq - (Dot(w0, w0) - rhoT * rhoT);
+                            if (disc >= 0 && rhoT > 1e-6)
+                            {
+                                double r1 = -bq + Math.Sqrt(disc), r2 = -bq - Math.Sqrt(disc), lam = Math.Abs(r1) < Math.Abs(r2) ? r1 : r2;
+                                if (lam > 1e-9)
+                                {
+                                    var vp = Add(Add(V, Scale(nLine, del)), Scale(tLine, lam));
+                                    double ang = Math.Acos(Math.Max(-1, Math.Min(1, Dot(Norm(Sub(V, cA)), Norm(Sub(vp, cA))))));
+                                    corner.V2 = vp; corner.Shifted = true;
+                                    res[il].EndShift[el] = lam; res[ia].EndShift[ea] = ang;   // straight edge: distance along it, arc: angle
+                                }
+                            }
+                        }
+                        (li ? res[i] : res[j]).Corners.Add(corner);   // a straight edge owns the cone
                     }
+                    catch (Exception ex) when (ex.Message.StartsWith("tip offset is not available")) { throw; }
                     catch (Exception ex) { Log("blend search "+i+","+j+": "+ex.Message); }
                 }
             FindJoins(edges, res);
@@ -956,7 +1041,11 @@ namespace MfgChamfer
             double d1 = p.Size;                                    // leg on F
             double d2 = d1 * Math.Sin(beta) / Math.Sin(phi + beta);   // leg on G
             double hB = d2 * Math.Sin(phi);                        // depth of the chamfer bottom (on G) below F
-            double rF = hB / Math.Tan(beta);                       // mill radius where its cone meets F
+            double o = p.TipOffset;                                // the mill's apex sits this far below the chamfer's lower edge, on the extended chamfer line
+            double rF = (hB + o) / Math.Tan(beta);                 // mill radius where its cone meets F
+            var bma = Sub(Scale(uG, d2), Scale(uF, d1)); var lat0 = Sub(bma, Scale(axis, Dot(bma, axis)));
+            var latU = Len(lat0) > 1e-12 ? Norm(lat0) : new double[3];   // outward, square to the axis: the way the apex slides along the chamfer line
+            var latV = Scale(latU, o / Math.Tan(beta)); var dzV = Scale(axis, o);   // shift of the apex (and the mill axis) from the chamfer's lower edge
             if (p.ToolDia / 2 < rF - 1e-9)
                 throw new Exception(string.Format(CultureInfo.InvariantCulture, "tool diameter must be at least {0:0.###} mm for this chamfer", 2 * rF * 1000));
 
@@ -966,8 +1055,8 @@ namespace MfgChamfer
             bool b1 = !e1 && Blocked(v1, t, n1, n2);
             bool k0 = b0 || blend.ConeEnd[0], k1 = b1 || blend.ConeEnd[1];   // ends that close with a runout cone
             double ext = Math.Max(d1, d2);
-            double s0 = e0 || blend.Join[0] ? 0 : b0 ? stop : -ext;       // blended / joined ends run exactly to the corner / neighbour
-            double s1 = e1 || blend.Join[1] ? len : b1 ? len - stop : len + ext;
+            double s0 = e0 ? blend.EndShift[0] : blend.Join[0] ? 0 : b0 ? stop : -ext;       // blended / joined ends run exactly to the corner / neighbour
+            double s1 = e1 ? len - blend.EndShift[1] : blend.Join[1] ? len : b1 ? len - stop : len + ext;
             if (s1 - s0 < 1e-6)
                 throw new Exception(string.Format(CultureInfo.InvariantCulture,
                     "edge ({0:0.###} mm) too short for a {1:0.###} mm tool between walls", len * 1000, p.ToolDia * 1000));
@@ -976,9 +1065,9 @@ namespace MfgChamfer
             {
                 double inside = Math.Max(0, Math.Min(s1, len) - Math.Max(s0, 0));
                 double aTri = 0.5 * d1 * d2 * Math.Sin(phi);
-                Func<int, bool, double> endVol = (k, on) => !on ? 0 : blend.ConeAxis[k] != null ? Math.PI / 3 * Math.Pow(Math.Max(d1, d2), 3) : LugVolume(hB, beta, Dot(nF, nG));
+                Func<int, bool, double> endVol = (k, on) => !on ? 0 : blend.ConeAxis[k] != null ? Math.PI / 3 * Math.Pow(Math.Max(d1, d2) + (blend.ConeShift[k] != null ? Len(blend.ConeShift[k]) : 0), 3) : LugVolume(hB + o, beta, Dot(nF, nG), o, Dot(latV, nG));
                 expected[0] = aTri * inside + endVol(0, k0) + endVol(1, k1)
-                            + blend.Corners.Sum(c => (2 * Math.PI - c.Gamma) * d1 * d1 * hB / 6);   // the cone's share in the material (upper bound)
+                            + blend.Corners.Sum(c => c.Shifted ? Math.PI * rF * rF * (hB + o) / 3 : (2 * Math.PI - c.Gamma) * d1 * d1 * hB / 6);   // the cone's share in the material (upper bound)
                 // Open ends: the tool runs on past the end (prism extended by ext). Usually that is air, but it may
                 // shave material the end meets at an angle (e.g. an existing chamfer) - a real run-off, not a wall.
                 int open = (b0 || e0 || blend.Join[0] ? 0 : 1) + (b1 || e1 || blend.Join[1] ? 0 : 1);
@@ -994,8 +1083,21 @@ namespace MfgChamfer
             }
             if (lines != null)
             {
-                PreviewLines(lines, p0, t, s0, s1, k0, k1, uF, uG, d2, phi, rF);
-                foreach (var c in blend.Corners) CornerLines(lines, c, axis, p.Size, hB);
+                PreviewLines(lines, p0, t, s0, s1, k0 && blend.ConeAxis[0] == null, k1 && blend.ConeAxis[1] == null, uF, uG, d2, phi, rF, latV, dzV, nG);
+                for (int kc = 0; kc < 2; kc++)   // the corner cone that closes a rim blend: its real shape, not the mill's own runout cone
+                {
+                    var cax = blend.ConeAxis[kc]; if (cax == null || !(kc == 0 ? k0 : k1)) continue;
+                    var mbp = Norm(Cross(t, Sub(Scale(uG, d2), Scale(uF, d1))));
+                    double mcp = Dot(mbp, cax), sAp = Math.Abs(mcp) > 0.2 ? d1 * Dot(mbp, uF) / mcp : -1;
+                    double hp = sAp > 1e-9 ? sAp : Math.Max(d1, d2), alp = sAp > 1e-9 ? Math.Asin(Math.Min(1, Math.Abs(mcp))) : beta;
+                    var vkp = Add(p0, Scale(t, kc == 0 ? 0 : len));
+                    var dsp = new double[3];   // the nominal cone; the slid one is drawn after it
+                    double hq = hp + Dot(dsp, cax); if (hq < 1e-6) { hq = hp; dsp = new double[3]; }
+                    var u1p = Math.Abs(Dot(uF, cax)) <= Math.Abs(Dot(uG, cax)) ? uF : uG;
+                    if (blend.ConeShift[kc] == null) ConeLines(lines, Add(Add(vkp, Scale(cax, hp)), dsp), vkp, hq * Math.Tan(alp), cax, blend.ConeDown[kc] == null ? null : u1p, blend.ConeDown[kc], RimCornerOutside(vkp, blend.ConeDown[kc], blend.ConeGeom[kc]));
+                    if (blend.ConeShift[kc] != null) { var dsl = blend.ConeShift[kc]; double hq2 = hp + Dot(dsl, cax); if (hq2 > 1e-6) ConeLines(lines, Add(Add(vkp, Scale(cax, hp)), dsl), vkp, hq2 * Math.Tan(alp), cax, blend.ConeDown[kc] == null ? null : u1p, blend.ConeDown[kc], RimCornerOutside(vkp, blend.ConeDown[kc], blend.ConeGeom[kc])); }
+                }
+                foreach (var c in blend.Corners) CornerLines(lines, c, axis, p.Size, hB, o, beta);
             }
 
             var list = new List<IBody2>();
@@ -1007,21 +1109,23 @@ namespace MfgChamfer
             }
             else
                 list.Add(Prism(Add(p0, Scale(t, s0)), t, s1 - s0, Scale(uF, d1), Scale(uG, d2), Scale(Add(nF, nG), ext), uF, modeler, math));
-            Func<double, double[]> apexAt = s => Add(Add(p0, Scale(t, s)), Scale(uG, d2));   // the mill tip sits on the chamfer's bottom edge
+            Func<double, double[]> apexAt = s => Add(Add(Add(p0, Scale(t, s)), Scale(uG, d2)), Add(latV, dzV));   // the mill tip sits on the chamfer's bottom edge
             // a rim blended into this edge ends it with the corner cone (axis square to the rim, in the floor plane), not the mill's own tilted one
-            Func<int, IBody2> endCone = k =>
+            Func<int, double[], IBody2> endConeS = (k, dshP) =>
             {
                 var ca = blend.ConeAxis[k];
-                if (ca == null) return Cone(apexAt(k == 0 ? s0 : s1), axis, hB, beta, stop, modeler);
+                if (ca == null) return Cone(apexAt(k == 0 ? s0 : s1), axis, hB + o, beta, stop, modeler);
                 // the cone tangent to the chamfer plane along the line from its corner on F, with its apex on the axis through this end
                 var mb = Norm(Cross(t, Sub(Scale(uG, d2), Scale(uF, d1))));
                 double mc = Dot(mb, ca), sAx = Math.Abs(mc) > 0.2 ? d1 * Dot(mb, uF) / mc : -1;
                 double h = sAx > 1e-9 ? sAx : Math.Max(d1, d2), alpha = sAx > 1e-9 ? Math.Asin(Math.Min(1, Math.Abs(mc))) : beta;
                 var vk = Add(p0, Scale(t, k == 0 ? 0 : len));
-                var cone = Cone(Add(vk, Scale(ca, h)), ca, h, Math.PI / 2 - alpha, 10 * Math.Max(Math.Max(d1, d2), hB), modeler);
+                var dsh = dshP ?? new double[3];   // tip offset: the cone slid along the line where the two chamfer planes meet
+                double hs = h + Dot(dsh, ca); if (hs < 1e-6) { hs = h; dsh = new double[3]; }
+                var cone = Cone(Add(Add(vk, Scale(ca, h)), dsh), ca, hs, Math.PI / 2 - alpha, 10 * Math.Max(Math.Max(d1, d2) + Len(dsh), hB), modeler);
                 // only the quarter between the rim's end (into the wall) and below the floor is cut, like the native corner
                 var dn = blend.ConeDown[k]; var u1 = Math.Abs(Dot(uF, ca)) <= Math.Abs(Dot(uG, ca)) ? uF : uG;
-                if (dn != null)
+                if (dn != null && dshP == null)   // the slid cone (tip offset) is a whole mill: no quarter clip
                 {
                     double L = 10 * Math.Max(Math.Max(d1, d2), hB);
                     try
@@ -1038,9 +1142,10 @@ namespace MfgChamfer
                 }
                 return cone;
             };
-            if (k0) list.Add(endCone(0));
-            if (k1) list.Add(endCone(1));
-            foreach (var c in blend.Corners) list.Add(Cone(Add(c.V, Scale(axis, hB)), axis, hB, beta, 10 * Math.Max(d1, hB), modeler));
+            Func<int, IBody2> endCone = k => endConeS(k, null);
+            if (k0) { if (blend.ConeShift[0] == null) list.Add(endCone(0)); if (blend.ConeShift[0] != null) list.Add(endConeS(0, blend.ConeShift[0])); }
+            if (k1) { if (blend.ConeShift[1] == null) list.Add(endCone(1)); if (blend.ConeShift[1] != null) list.Add(endConeS(1, blend.ConeShift[1])); }
+            foreach (var c in blend.Corners) list.Add(c.Shifted ? Cone(Add(c.V2, Scale(axis, hB + o)), axis, hB + o, beta, 10 * Math.Max(d1, hB + o), modeler) : Cone(Add(c.V, Scale(axis, hB)), axis, hB, beta, 10 * Math.Max(d1, hB), modeler));
             foreach (var f in blend.Flats) list.Add(FlatCornerTool(f, modeler, math));
             return list;
         }
@@ -1060,13 +1165,13 @@ namespace MfgChamfer
 
         // Material the mill's cone removes beyond the end of the prism (half of its part inside the wedge):
         // slices of the cone (apex on the other face G, axis normal to F) cut by G's plane. cosPsi = nF . nG.
-        static double LugVolume(double hB, double beta, double cosPsi)
+        static double LugVolume(double hB, double beta, double cosPsi, double o = 0, double lat = 0)
         {
             double cot = 1 / Math.Tan(beta), sum = 0;
             const int n = 200;
             for (int i = 0; i < n; i++)
             {
-                double h = hB * (i + 0.5) / n, r = h * cot, D = h * cosPsi, a;   // D: signed distance of the axis from G's plane (+ = outside)
+                double h = hB * (i + 0.5) / n, r = h * cot, D = (h - o) * cosPsi + lat, a;   // D: signed distance of the axis from G's plane (+ = outside)
                 if (D >= r) a = 0;
                 else if (D <= -r) a = Math.PI * r * r;
                 else a = r * r * Math.Acos(D / r) - D * Math.Sqrt(r * r - D * D);
@@ -1092,37 +1197,131 @@ namespace MfgChamfer
         }
 
         // Preview of a blended corner: the radius-d arc on the shared face and generator lines to the cone apex.
-        static void CornerLines(List<double[][]> lines, Corner c, double[] axis, double d, double hB)
+        static void CornerLines(List<double[][]> lines, Corner c, double[] axis, double d, double hB, double o, double beta)
         {
             var u = c.DirB;
             var w = Norm(Sub(c.DirA, Scale(u, Dot(c.DirA, u))));
             double g = c.Gamma;
-            Func<double, double[]> arc = th => Add(c.V, Add(Scale(u, d * Math.Cos(th)), Scale(w, d * Math.Sin(th))));
-            var apex = Add(c.V, Scale(axis, hB));
+            var ctr = c.Shifted ? c.V2 : c.V; double rr = c.Shifted ? (hB + o) / Math.Tan(beta) : d;   // with a tip offset the cone is centred on V2 and wider
+            Func<double, double[]> arc = th => Add(ctr, Add(Scale(u, rr * Math.Cos(th)), Scale(w, rr * Math.Sin(th))));
+            Func<double[], bool> air = x => Dot(Sub(x, c.V), c.NA) > 1e-6 && Dot(Sub(x, c.V), c.NB) > 1e-6;   // the air wedge outside both walls
+            var apex = Add(ctr, Scale(axis, c.Shifted ? hB + o : hB));
             const int segs = 16;
             for (int i = 0; i < segs; i++)
-                lines.Add(new[] { arc(g * i / segs), arc(g * (i + 1) / segs) });
+                AddClippedFn(lines, arc(g * i / segs), arc(g * (i + 1) / segs), air);
             for (int i = 0; i <= 4; i++)
-                lines.Add(new[] { apex, arc(g * i / 4) });
+                AddClippedFn(lines, apex, arc(g * i / 4), air);
+        }
+
+        // The part near the vertex of a rim blend, as a test for preview strokes: below the floor it ends at the rim's wall, above it the two walls of the rising edge bound it
+        static Func<double[], bool> RimCornerOutside(double[] V, double[] down, double[][] g)
+        {
+            if (g == null || down == null) return null;
+            return x =>
+            {
+                var r = Sub(x, V);
+                bool inMat;
+                if (Dot(r, down) >= -1e-7) inMat = g[0] == null || Dot(r, g[0]) <= 1e-7;
+                else inMat = (g[1] == null || Dot(r, g[1]) <= 1e-7) && (g[2] == null || Dot(r, g[2]) <= 1e-7);
+                return !inMat;
+            };
+        }
+
+        // Normal of the chamfer plane an edge gets at the point v (tangent plane for an arc): fMill = the face the mill works from, t = direction along the edge,
+        // dn != null: the legs are measured in the plane square to dn (rim blend with a leaning edge)
+        static double[] ChamferPlaneN(IFace2 fMill, IFace2 fOther, double[] v, double[] t, ChamferParams p, double[] dn)
+        {
+            var nF = FaceNormalAt(fMill, v); var nG = FaceNormalAt(fOther, v);
+            if (nF == null || nG == null) return null;
+            var uF = Norm(Cross(nF, t)); if (Dot(uF, nG) > 0) uF = Scale(uF, -1);
+            var uG = Norm(Cross(nG, t)); if (Dot(uG, nF) > 0) uG = Scale(uG, -1);
+            if (dn != null) { uF = Norm(Sub(uF, Scale(dn, Dot(uF, dn)))); uG = Norm(Sub(uG, Scale(dn, Dot(uG, dn)))); }
+            double phi = Math.Acos(Math.Max(-1, Math.Min(1, Dot(uF, uG))));
+            double d1 = p.Size, d2 = d1 * Math.Sin(p.Angle) / Math.Sin(phi + p.Angle);
+            var nPi = Cross(t, Sub(Scale(uG, d2), Scale(uF, d1)));
+            return Len(nPi) < 1e-12 ? null : Norm(nPi);
+        }
+
+        // Preview of a corner cone that closes a rim blend: the rim in the plane through vk square to ca (the quarter between u1 and dn when the cone is clipped to the corner, else all round) and generators to the apex
+        static void ConeLines(List<double[][]> lines, double[] apex, double[] vk, double rr, double[] ca, double[] u1, double[] dn, Func<double[], bool> outside)
+        {
+            Func<double[], double[]> perp = v => { var w0 = Sub(v, Scale(ca, Dot(v, ca))); return Len(w0) > 1e-9 ? Norm(w0) : null; };
+            double[] e1 = u1 == null ? null : perp(u1), e2 = dn == null ? null : perp(dn), w;
+            double span = 2 * Math.PI;
+            if (e1 != null && e2 != null)
+            {
+                var q = Sub(e2, Scale(e1, Dot(e1, e2)));
+                if (Len(q) < 1e-9) return;
+                w = Norm(q); span = Math.Acos(Math.Max(-1, Math.Min(1, Dot(e1, e2))));
+            }
+            else { e1 = perp(Cross(ca, new[] { 1.0, 0, 0 })) ?? perp(Cross(ca, new[] { 0, 1.0, 0 })); w = Cross(ca, e1); }
+            Func<double, double[]> rim = th => Add(vk, Add(Scale(e1, rr * Math.Cos(th)), Scale(w, rr * Math.Sin(th))));
+            const int segs = 16;
+            Action<double[], double[]> add = (a0, b0) => { if (outside == null) lines.Add(new[] { a0, b0 }); else AddClippedFn(lines, a0, b0, outside); };
+            for (int i = 0; i < segs; i++) add(rim(span * i / segs), rim(span * (i + 1) / segs));
+            bool all = span > 6; int gens = all ? 8 : 4;
+            for (int i = 0; i <= gens; i++) { if (all && i == gens) break; add(apex, rim(span * i / gens)); }
+        }
+
+        // Like AddClipped, but the part is given as a test (outside(x) = the point is not in the part); the stroke is cut where it crosses the boundary
+        static void AddClippedFn(List<double[][]> lines, double[] a, double[] b, Func<double[], bool> outside)
+        {
+            const int n = 16;
+            Func<int, double[]> P = i => Add(a, Scale(Sub(b, a), (double)i / n));
+            double[] start = outside(P(0)) ? null : P(0);
+            for (int i = 1; i <= n; i++)
+            {
+                var p0 = P(i - 1); var p1 = P(i);
+                bool o1 = outside(p1);
+                if (start != null && o1)
+                {
+                    double lo = 0, hi = 1;
+                    for (int it = 0; it < 12; it++) { double m = 0.5 * (lo + hi); if (outside(Add(p0, Scale(Sub(p1, p0), m)))) hi = m; else lo = m; }
+                    lines.Add(new[] { start, Add(p0, Scale(Sub(p1, p0), lo)) });
+                    start = null;
+                }
+                else if (start == null && !o1)
+                {
+                    double lo = 0, hi = 1;
+                    for (int it = 0; it < 12; it++) { double m = 0.5 * (lo + hi); if (outside(Add(p0, Scale(Sub(p1, p0), m)))) lo = m; else hi = m; }
+                    start = Add(p0, Scale(Sub(p1, p0), hi));
+                }
+            }
+            if (start != null) lines.Add(new[] { start, b });
+        }
+
+        // A preview stroke, cut off where it would leave the part (beyond the plane of the other face: s = a point on that plane, n = its outward normal)
+        static void AddClipped(List<double[][]> lines, double[] a, double[] b, double[] s, double[] n)
+        {
+            const double eps = 1e-7;
+            double da = Dot(Sub(a, s), n), db = Dot(Sub(b, s), n);   // > 0: outside the part
+            if (da > eps && db > eps) return;
+            if (da > eps || db > eps)
+            {
+                double u = da / (da - db);
+                var m = Add(a, Scale(Sub(b, a), u));
+                if (da > eps) a = m; else b = m;
+            }
+            lines.Add(new[] { a, b });
         }
 
         // Generator strokes on each runout cone (outline and hatch of the flat faces come from FaceLines).
         static void PreviewLines(List<double[][]> lines, double[] p0, double[] t, double s0, double s1, bool b0, bool b1,
-                                 double[] uF, double[] uG, double d2, double phi, double rF)
+                                 double[] uF, double[] uG, double d2, double phi, double rF, double[] lat, double[] dz, double[] nG)
         {
             foreach (var end in new[] { Tuple.Create(b0, s0, Scale(t, -1)), Tuple.Create(b1, s1, t) })
             {
                 if (!end.Item1) continue;
                 var S = Add(p0, Scale(t, end.Item2));
                 var w = end.Item3;
-                var apex = Add(S, Scale(uG, d2));
-                var Z = Add(S, Scale(uF, d2 * Math.Cos(phi)));   // centre of the cone's circle on face F
+                var apex = Add(Add(S, Scale(uG, d2)), Add(lat, dz));
+                var Z = Add(Add(S, Scale(uF, d2 * Math.Cos(phi))), lat);   // centre of the cone's circle on face F
                 Func<double, double[]> arc = th => Add(Z, Add(Scale(w, rF * Math.Cos(th)), Scale(uF, rF * Math.Sin(th))));
                 const int segs = 16;
                 for (int i = 0; i < segs; i++)
-                    lines.Add(new[] { arc(Math.PI / 2 * i / segs), arc(Math.PI / 2 * (i + 1) / segs) });
+                    AddClipped(lines, arc(Math.PI / 2 * i / segs), arc(Math.PI / 2 * (i + 1) / segs), S, nG);
                 for (int i = 0; i < 4; i++)
-                    lines.Add(new[] { apex, arc(Math.PI / 2 * i / 4) });
+                    AddClipped(lines, apex, arc(Math.PI / 2 * i / 4), S, nG);
             }
         }
 
@@ -1391,7 +1590,7 @@ namespace MfgChamfer
     [ComVisible(true)]
     public class ChamferPage : IPropertyManagerPage2Handler9
     {
-        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdAngle = 26, IdTangent = 27, IdMenuReverse = 30;
+        const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdAngle = 26, IdTangent = 27, IdTip = 28, IdMenuReverse = 30;
         const string FlipCaption = "Reverse direction";
         readonly ISldWorks sw;
         readonly IModelDoc2 model;
@@ -1400,7 +1599,7 @@ namespace MfgChamfer
         readonly ChamferParams p;
         IPropertyManagerPage2 page;
         IPropertyManagerPageSelectionbox sel;
-        IPropertyManagerPageNumberbox numSize, numAngle, numDia, numClr;
+        IPropertyManagerPageNumberbox numSize, numAngle, numDia, numClr, numTip;
         IPropertyManagerPageCheckbox chkBlend, chkFlat, chkTangent;
         bool ok;
         List<object> edges = new List<object>();
@@ -1410,9 +1609,9 @@ namespace MfgChamfer
         bool busy;                // re-entrancy guard for the preview
         IBody2 hidden;            // real body hidden during preview
         readonly Dictionary<string, bool> flips = new Dictionary<string, bool>();   // per edge (by geometry key)
-        const string Hint = "Select outside edges (straight at any angle between the faces, or circle / arc edges of holes, bosses and pocket corners; select a whole tangent chain).  Ends that run into a wall stop at tool radius + clearance " +
-                            "and finish with the cone the chamfer mill leaves (mill angle = 180° - 2 x chamfer angle).\n" +
-                            "Reverse direction applies to the edge highlighted in the list (or the last one picked).";
+        const string Hint = "Select the edges to chamfer: straight or arc edges, at any angle between the faces.\n" +
+                            "Ends that run into a wall stop short by tool radius + clearance and finish with the mill's cone.\n" +
+                            "Reverse direction applies to the highlighted edge.";
 
 
         public ChamferPage(ISldWorks sw, IModelDoc2 model, IFeature feat, IMacroFeatureData data)
@@ -1442,7 +1641,7 @@ namespace MfgChamfer
             var g1 = (IPropertyManagerPageGroup)page.AddGroupBox(1, "Items To Chamfer", gOpts); keep.Add(g1);
             sel = (IPropertyManagerPageSelectionbox)g1.AddControl2(IdSel,
                 (short)swPropertyManagerPageControlType_e.swControlType_Selectionbox, "Edges", indent, cOpts,
-                "Straight outside edges to chamfer. Highlight an edge in the list and tick Reverse direction to machine it from its other face.");
+                "Edges to chamfer.");
             ((IPropertyManagerPageControl)sel).SetStandardPictureLabel((int)swControlBitmapLabelType_e.swBitmapLabel_SelectEdge);
             sel.SingleEntityOnly = false;
             sel.Height = 36;
@@ -1450,8 +1649,7 @@ namespace MfgChamfer
             sel.SetSelectionFilters(new[] { (int)swSelectType_e.swSelEDGES });
             var flipBtn = (IPropertyManagerPageBitmapButton)g1.AddControl2(IdFlip,
                 (short)swPropertyManagerPageControlType_e.swControlType_BitmapButton, FlipCaption, left, cOpts,
-                "Machine the highlighted edge from its other face (moves the runout cone to the other face). " +
-                "Default: from the upward-facing (+Z) face, or the larger face.");
+                "Machine the highlighted edge from its other face.");
             flipBtn.SetStandardBitmaps((int)swPropertyManagerPageBitmapButtons_e.swBitmapButtonImage_reverse_direction);
             try   // under the selection icon, left of the list (the group below is laid out from this button, so the list is kept short)
             {
@@ -1464,26 +1662,26 @@ namespace MfgChamfer
             var g2 = (IPropertyManagerPageGroup)page.AddGroupBox(2, "Chamfer Parameters", gOpts); keep.Add(g2);
             chkTangent = (IPropertyManagerPageCheckbox)g2.AddControl2(IdTangent,
                 (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, "Tangent propagation", left, cOpts,
-                "Like the native tools: the edges that continue the selected edges tangentially (a pocket outline of lines and arcs, the rim of a slot) are chamfered too, without being selected.");
+                "Also chamfer edges that continue the selection tangentially.");
             chkTangent.Checked = p.Tangent;
-            numSize = Number(g2, IdSize, "Chamfer distance (on the mill's face)", p.Size, 0.00001, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance, cOpts, indent, left);
+            numSize = Number(g2, IdSize, "Chamfer distance (on the mill's face)", p.Size, 0.00001, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance, cOpts, indent, left,
+                          swNumberboxUnitType_e.swNumberBox_Length, "Chamfer width on the mill's face.");
             numAngle = Number(g2, IdAngle, "Chamfer angle (from the mill's face)", p.Angle, 0.0174533, 1.5533, swControlBitmapLabelType_e.swBitmapLabel_AngularDistance, cOpts, indent, left,
-                              swNumberboxUnitType_e.swNumberBox_Angle);
+                              swNumberboxUnitType_e.swNumberBox_Angle, "Chamfer angle from the mill's face.");
             chkBlend = (IPropertyManagerPageCheckbox)g2.AddControl2(IdBlend,
                 (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, "Blend chamfers at inside corners", left, cOpts,
-                "Two selected edges that meet at an inside corner (e.g. a step wall and the floor, on the same side face) " +
-                "are chamfered as one tool path from that side face: the chamfer turns around the corner with radius = chamfer distance " +
-                "instead of stopping before the wall.");
+                "Chamfer two edges meeting at an inside corner as one path that turns around the corner.");
             chkBlend.Checked = p.Blend;
             chkFlat = (IPropertyManagerPageCheckbox)g2.AddControl2(IdFlat,
                 (short)swPropertyManagerPageControlType_e.swControlType_Checkbox, "Flat corner where 3 chamfers meet", left, cOpts,
-                "Where three selected edges meet at an outside corner, finish it with a small flat triangle like the native Chamfer " +
-                "(needs a 3D move on the machine). Off: the three chamfers meet in a point, as a chamfer mill tracing the edges leaves it.");
+                "Finish a 3-chamfer outside corner with a small flat triangle (needs a 3D move). Off: the chamfers meet in a point.");
             chkFlat.Checked = p.Flat;
 
             var g3 = (IPropertyManagerPageGroup)page.AddGroupBox(3, "Chamfer Mill", gOpts); keep.Add(g3);
-            numDia = Number(g3, IdDia, "Tool diameter", p.ToolDia, 0.0001, 1, swControlBitmapLabelType_e.swBitmapLabel_Diameter, cOpts, indent, left);
-            numClr = Number(g3, IdClr, "Clearance to wall", p.Clearance, 0, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance1, cOpts, indent, left);
+            numDia = Number(g3, IdDia, "Tool diameter", p.ToolDia, 0.0001, 1, swControlBitmapLabelType_e.swBitmapLabel_Diameter, cOpts, indent, left, swNumberboxUnitType_e.swNumberBox_Length, "Chamfer mill diameter.");
+            numTip = Number(g3, IdTip, "Tip offset (below the chamfer's lower edge)", p.TipOffset, 0, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance1, cOpts, indent, left,
+                            swNumberboxUnitType_e.swNumberBox_Length, "Mill tip sits this far below the chamfer's lower edge. Not available where an arc runs into a wall.");
+            numClr = Number(g3, IdClr, "Clearance to wall", p.Clearance, 0, 1, swControlBitmapLabelType_e.swBitmapLabel_LinearDistance1, cOpts, indent, left, swNumberboxUnitType_e.swNumberBox_Length, "Gap kept between the mill and a wall.");
 
             Addin.PageOpen = true;
             page.Show2(0);
@@ -1789,11 +1987,11 @@ namespace MfgChamfer
 
         IPropertyManagerPageNumberbox Number(IPropertyManagerPageGroup g, int id, string label, double val, double min, double max,
                                              swControlBitmapLabelType_e pic, int cOpts, short indent, short left,
-                                             swNumberboxUnitType_e unit = swNumberboxUnitType_e.swNumberBox_Length)
+                                             swNumberboxUnitType_e unit = swNumberboxUnitType_e.swNumberBox_Length, string tip = null)
         {
             keep.Add(g.AddControl2(id + 100, (short)swPropertyManagerPageControlType_e.swControlType_Label, label, left, cOpts, ""));
             var nb = (IPropertyManagerPageNumberbox)g.AddControl2(id,
-                (short)swPropertyManagerPageControlType_e.swControlType_Numberbox, label, indent, cOpts, label);
+                (short)swPropertyManagerPageControlType_e.swControlType_Numberbox, label, indent, cOpts, tip ?? label);
             ((IPropertyManagerPageControl)nb).SetStandardPictureLabel((int)pic);
             bool ang = unit == swNumberboxUnitType_e.swNumberBox_Angle;
             nb.SetRange2((int)unit, min, max, true, ang ? Math.PI / 180 : 0.0005, ang ? Math.PI / 36 : 0.001, ang ? Math.PI / 1800 : 0.0001);   // exact 1 / 5 / 0.1 deg steps
@@ -1900,6 +2098,7 @@ namespace MfgChamfer
             if (Id == IdSize) p.Size = Value;
             else if (Id == IdDia) p.ToolDia = Value;
             else if (Id == IdClr) p.Clearance = Value;
+            else if (Id == IdTip) p.TipOffset = Value;
             else if (Id == IdAngle)
             {
                 p.Angle = Math.Round(Value * 180 / Math.PI, 4) * Math.PI / 180;   // drop float noise (31.00000043 deg)
