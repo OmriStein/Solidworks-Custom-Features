@@ -1,9 +1,16 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+using Microsoft.Win32;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
+using SolidWorks.Interop.swpublished;
+using static MfgChamfer.Core;
+using static MfgChamfer.Geo;
 
 namespace MfgChamfer
 {
@@ -12,18 +19,6 @@ namespace MfgChamfer
     // the tool is the chamfer's cross-section triangle revolved about that axis (full circle, or the arc's sector).
     public static partial class Engine
     {
-        // Start and end point of an edge (the same point twice for a closed edge)
-        public static double[][] Ends(IEdge e)
-        {
-            var v0 = e.GetStartVertex() as IVertex;
-            var v1 = e.GetEndVertex() as IVertex;
-            if (v0 != null && v1 != null) return new[] { (double[])v0.GetPoint(), (double[])v1.GetPoint() };
-            var cp = e.GetCurveParams3();
-            var a = (double[])((ICurve)e.GetCurve()).Evaluate2(cp.UMinValue, 0);
-            var q = new[] { a[0], a[1], a[2] };
-            return new[] { q, q };
-        }
-
         // Selected edges that continue each other tangentially (a pocket outline of lines and arcs): the tools of
         // such neighbours meet exactly at the shared end instead of running on past it.
         static void FindJoins(IList<IEdge> edges, BlendInfo[] res)
@@ -46,83 +41,6 @@ namespace MfgChamfer
                     }
                     catch { }
                 }
-        }
-
-        // Edges that continue start tangentially through shared vertices (lines and arcs), the whole chain, not start itself
-        public static List<IEdge> TangentChain(IEdge start)
-        {
-            var chain = new List<IEdge> { start };
-            for (int i = 0; i < chain.Count && chain.Count < 200; i++)
-            {
-                var cur = chain[i];
-                foreach (var v in new[] { cur.GetStartVertex() as IVertex, cur.GetEndVertex() as IVertex })
-                {
-                    if (v == null) continue;
-                    try
-                    {
-                        var pt = (double[])v.GetPoint();
-                        var tc = TangentAt(cur, pt);
-                        if (tc == null) continue;
-                        foreach (IEdge n in (object[])v.GetEdges())
-                        {
-                            if (chain.Any(x => SameEdge(x, n))) continue;
-                            var tn = TangentAt(n, pt);
-                            if (tn == null || Math.Abs(Dot(tc, tn)) < 0.9999 || !TangentFaces(cur, n, pt)) continue;
-                            chain.Add(n);
-                        }
-                    }
-                    catch { }
-                }
-            }
-            chain.RemoveAt(0);
-            return chain;
-        }
-
-        // Same edge: same end points and same kind of curve (an arc and its complement differ in radius/line-ness)
-        static bool SameEdge(IEdge a, IEdge b)
-        {
-            var ea = Ends(a); var eb = Ends(b);
-            bool ends = (Dist(ea[0], eb[0]) < 1e-8 && Dist(ea[1], eb[1]) < 1e-8) || (Dist(ea[0], eb[1]) < 1e-8 && Dist(ea[1], eb[0]) < 1e-8);
-            if (!ends) return false;
-            var ca = (ICurve)a.GetCurve(); var cb = (ICurve)b.GetCurve();
-            if (ca.IsLine() != cb.IsLine()) return false;
-            return ca.IsLine() || Math.Abs(((double[])ca.CircleParams)[6] - ((double[])cb.CircleParams)[6]) < 1e-8;
-        }
-
-        static double[] TangentAt(IEdge e, double[] V)
-        {
-            var c = (ICurve)e.GetCurve();
-            if (c.IsLine()) { var q = Ends(e); return Norm(Sub(q[1], q[0])); }
-            if (!c.IsCircle()) return null;
-            var cp = (double[])c.CircleParams;
-            return Norm(Cross(new[] { cp[3], cp[4], cp[5] }, Sub(V, new[] { cp[0], cp[1], cp[2] })));
-        }
-
-        // Native-style propagation: the edges share a face and their other faces run tangentially into each other at pt
-        // (same rule that keeps a straight edge from dragging in the collinear edge of a different wall).
-        static bool TangentFaces(IEdge a, IEdge b, double[] pt)
-        {
-            try
-            {
-                var fa = ((object[])a.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
-                var fb = ((object[])b.GetTwoAdjacentFaces2()).Cast<IFace2>().ToArray();
-                Func<IFace2, double[]> nrm = f => ((ISurface)f.GetSurface()).IsPlane() ? PlaneNormal(f) : FaceNormalAt(f, pt);
-                for (int x = 0; x < 2; x++) for (int y = 0; y < 2; y++)
-                    if (fa[x].IsSame(fb[y]))
-                    {
-                        IFace2 oa = fa[1 - x], ob = fb[1 - y];
-                        if (oa.IsSame(ob) || Dot(nrm(oa), nrm(ob)) > 0.9999) return true;
-                    }
-            }
-            catch { }
-            return false;
-        }
-
-        static bool SharesFace(IEdge a, IEdge b)
-        {
-            var fa = (object[])a.GetTwoAdjacentFaces2(); var fb = (object[])b.GetTwoAdjacentFaces2();
-            foreach (IFace2 x in fa) foreach (IFace2 y in fb) if (x.IsSame(y)) return true;
-            return false;
         }
 
         static List<IBody2> CircleTools(IEdge edge, ChamferParams p, IModeler modeler, IMathUtility math,

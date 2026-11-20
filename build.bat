@@ -13,10 +13,12 @@ set IMP=/link
 if /i "%NAME%"=="CFTest" set IMP=/r
 if not exist out mkdir out
 set RES=
+set SRC=
+for /r src %%f in (*.cs) do set SRC=!SRC! "%%f"
 for %%f in (icons\*.png) do set RES=!RES! /resource:"%%f",icons.%%~nxf
 "%CSC%" /nologo /target:library /platform:x64 /optimize+ /nostdlib+ /out:out\%NAME%.dll ^
   /r:"%FW%\mscorlib.dll" /r:"%FW%\System.dll" /r:"%FW%\System.Core.dll" /r:"%FW%\System.Windows.Forms.dll" /r:"%FW%\System.Drawing.dll" ^
   %IMP%:"%SW%\SolidWorks.Interop.sldworks.dll" %IMP%:"%SW%\SolidWorks.Interop.swpublished.dll" %IMP%:"%SW%\SolidWorks.Interop.swconst.dll" ^
-  %RES% src\*.cs
+  %RES% !SRC!
 if errorlevel 1 (echo BUILD FAILED & exit /b 1)
 echo Built out\%NAME%.dll

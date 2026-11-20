@@ -8,7 +8,7 @@ net session >nul 2>&1 || (
 cd /d "%~dp0"
 tasklist /fi "imagename eq SLDWORKS.exe" | find /i "SLDWORKS.exe" >nul && (echo Close SOLIDWORKS first. & goto end)
 rem From the source repository: build first. From a release zip (no src folder): use the included DLL.
-if exist src\CustomFeatures.cs (call build.bat || goto end)
+if exist src\Core\Addin.cs (call build.bat || goto end)
 if not exist out\CustomFeatures.dll (echo out\CustomFeatures.dll not found. & goto end)
 set RA=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe
 rem older builds were called MfgChamfer.dll: remove that registration first
