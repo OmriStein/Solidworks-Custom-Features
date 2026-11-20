@@ -30,7 +30,7 @@ namespace MfgChamfer
             foreach (var e in edges) ((IEntity)e).Select4(true, sd);
             var f = model.FeatureManager.InsertMacroFeature3("CNC Chamfer", MacroFeature.ProgIdName, null,
                 ChamferParams.Names, ChamferParams.Types, p.Values(), null, null,
-                new[] { new DispatchWrapper(body) }, MacroFeature.Icons(), (int)swMacroFeatureOptions_e.swMacroFeatureByDefault);
+                new[] { new DispatchWrapper(body) }, FeatureBase.Icons("feat"), (int)swMacroFeatureOptions_e.swMacroFeatureByDefault);
             model.ClearSelection2(true);
             if (f == null)
                 sw.SendMsgToUser2("CNC Chamfer: the feature could not be created.", (int)swMessageBoxIcon_e.swMbStop, (int)swMessageBoxBtn_e.swMbOk);

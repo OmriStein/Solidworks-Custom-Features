@@ -17,7 +17,7 @@ namespace MfgChamfer
     // PropertyManager page (insert + edit definition)
     // ------------------------------------------------------------------------------------------
     [ComVisible(true)]
-    public class ChamferPage : IPropertyManagerPage2Handler9
+    public class ChamferPage : FeaturePage
     {
         const int IdSel = 10, IdSize = 20, IdDia = 21, IdClr = 22, IdFlip = 23, IdBlend = 24, IdFlat = 25, IdAngle = 26, IdTangent = 27, IdTip = 28, IdMenuReverse = 30;
         const string FlipCaption = "Reverse direction";
@@ -26,7 +26,6 @@ namespace MfgChamfer
         readonly IFeature feat;          // null when inserting
         readonly IMacroFeatureData data; // null when inserting
         readonly ChamferParams p;
-        IPropertyManagerPage2 page;
         IPropertyManagerPageSelectionbox sel;
         IPropertyManagerPageNumberbox numSize, numAngle, numDia, numClr, numTip;
         IPropertyManagerPageCheckbox chkBlend, chkFlat, chkTangent;
@@ -34,7 +33,6 @@ namespace MfgChamfer
         List<object> edges = new List<object>();
         readonly List<IBody2> preview = new List<IBody2>();
         bool shown;
-        readonly List<object> keep = new List<object>();   // group boxes and labels: SOLIDWORKS does not hold them, a GC that finalizes their wrappers stops all PropertyManager callbacks
         bool busy;                // re-entrancy guard for the preview
         IBody2 hidden;            // real body hidden during preview
         readonly Dictionary<string, bool> flips = new Dictionary<string, bool>();   // per edge (by geometry key)
@@ -47,20 +45,13 @@ namespace MfgChamfer
         {
             this.sw = sw; this.model = model; this.feat = feat; this.data = data;
             selectTimer.Tick += SelectPending;
-            p = data != null ? ChamferParams.Read(data) : Addin.Last.Clone();
+            p = data != null ? ChamferParams.Read(data) : ChamferDef.Last.Clone();
             p.Flips = data != null ? p.Flips : "";
         }
 
         public void Show()
         {
-            int err = 0;
-            int opts = (int)(swPropertyManagerPageOptions_e.swPropertyManagerOptions_OkayButton |
-                             swPropertyManagerPageOptions_e.swPropertyManagerOptions_CancelButton |
-                             swPropertyManagerPageOptions_e.swPropertyManagerOptions_LockedPage);
-            page = (IPropertyManagerPage2)sw.CreatePropertyManagerPage(Addin.Title, opts, this, ref err);
-            if (page == null) throw new Exception("could not create PropertyManager page (" + err + ")");
-            try { page.SetTitleBitmap2(Addin.Icon("pm_title.png")); } catch { }
-            Message(Hint);
+            CreatePage(sw, ChamferDef.Title, Hint);
 
             int gOpts = (int)(swAddGroupBoxOptions_e.swGroupBoxOptions_Visible | swAddGroupBoxOptions_e.swGroupBoxOptions_Expanded);
             int cOpts = (int)(swAddControlOptions_e.swControlOptions_Visible | swAddControlOptions_e.swControlOptions_Enabled);
@@ -242,12 +233,6 @@ namespace MfgChamfer
             }
         }
 
-        void Message(string text)
-        {
-            page.SetMessage3(text, (int)swPropertyManagerPageMessageVisibility.swImportantMessageBox,
-                (int)swPropertyManagerPageMessageExpanded.swMessageBoxExpand, Addin.Title);
-        }
-
         static string Key(IEdge e)
         {
             var ab = Geo.Ends(e);
@@ -414,21 +399,7 @@ namespace MfgChamfer
             if (hidden != null) { try { hidden.DisableDisplay = false; } catch { } hidden = null; }
         }
 
-        IPropertyManagerPageNumberbox Number(IPropertyManagerPageGroup g, int id, string label, double val, double min, double max,
-                                             swControlBitmapLabelType_e pic, int cOpts, short indent, short left,
-                                             swNumberboxUnitType_e unit = swNumberboxUnitType_e.swNumberBox_Length, string tip = null)
-        {
-            keep.Add(g.AddControl2(id + 100, (short)swPropertyManagerPageControlType_e.swControlType_Label, label, left, cOpts, ""));
-            var nb = (IPropertyManagerPageNumberbox)g.AddControl2(id,
-                (short)swPropertyManagerPageControlType_e.swControlType_Numberbox, label, indent, cOpts, tip ?? label);
-            ((IPropertyManagerPageControl)nb).SetStandardPictureLabel((int)pic);
-            bool ang = unit == swNumberboxUnitType_e.swNumberBox_Angle;
-            nb.SetRange2((int)unit, min, max, true, ang ? Math.PI / 180 : 0.0005, ang ? Math.PI / 36 : 0.001, ang ? Math.PI / 1800 : 0.0001);   // exact 1 / 5 / 0.1 deg steps
-            nb.Value = val;
-            return nb;
-        }
-
-        public void OnClose(int Reason)
+        public override void OnClose(int Reason)
         {
             if (Reason == (int)swPropertyManagerPageCloseReasons_e.swPropertyManagerPageClose_Okay)
             {
@@ -450,7 +421,7 @@ namespace MfgChamfer
             p.Edges = ChamferParams.EncodeEdges(list.Cast<object>());
         }
 
-        public void AfterClose()
+        public override void AfterClose()
         {
             Addin.PageOpen = false;
             try
@@ -463,7 +434,7 @@ namespace MfgChamfer
                     return;
                 }
                 var last = p.Clone(); last.Flips = "";
-                Addin.Last = last;
+                ChamferDef.Last = last;
                 // Freeze the view, show the real body again, rebuild, then drop the preview and redraw once.
                 IModelView view = null;
                 try { view = model.ActiveView as IModelView; if (view != null) view.EnableGraphicsUpdate = false; } catch { view = null; }
@@ -501,28 +472,15 @@ namespace MfgChamfer
             Inserter.ReportError(sw, feat);
         }
 
-        // --- unused handler members -------------------------------------------------------
-        public void AfterActivation() { }
-        public bool OnHelp() { return true; }
-        public bool OnPreviousPage() { return true; }
-        public bool OnNextPage() { return true; }
-        public bool OnPreview() { return true; }
-        public void OnWhatsNew() { }
-        public void OnUndo() { }
-        public void OnRedo() { }
-        public bool OnTabClicked(int Id) { return true; }
-        public void OnGroupExpand(int Id, bool Expanded) { }
-        public void OnGroupCheck(int Id, bool Checked) { }
-        public void OnCheckboxCheck(int Id, bool Checked)
+        // --- handler members --------------------------------------------------------------
+        public override void OnCheckboxCheck(int Id, bool Checked)
         {
             if (Id == IdBlend) { p.Blend = Checked; UpdatePreview(); }
             else if (Id == IdFlat) { p.Flat = Checked; UpdatePreview(); }
             else if (Id == IdTangent) { p.Tangent = Checked; UpdatePreview(); }
         }
-        public void OnOptionCheck(int Id) { }
-        public void OnButtonPress(int Id) { if (Id == IdFlip) ToggleCurrent(null); }
-        public void OnTextboxChanged(int Id, string Text) { }
-        public void OnNumberboxChanged(int Id, double Value)
+        public override void OnButtonPress(int Id) { if (Id == IdFlip) ToggleCurrent(null); }
+        public override void OnNumberboxChanged(int Id, double Value)
         {
             if (Id == IdSize) p.Size = Value;
             else if (Id == IdDia) p.ToolDia = Value;
@@ -534,18 +492,12 @@ namespace MfgChamfer
             }
             UpdatePreview();
         }
-        public void OnComboboxEditChanged(int Id, string Text) { }
-        public void OnComboboxSelectionChanged(int Id, int Item) { }
-        public void OnListboxSelectionChanged(int Id, int Item) { }
-        public void OnSelectionboxFocusChanged(int Id) { }
-        public void OnSelectionboxListChanged(int Id, int Count)
+        public override void OnSelectionboxListChanged(int Id, int Count)
         {
             if (!loading && missingCount > 0) { missingCount = 0; missing.Clear(); missingNames.Clear(); }
             UpdatePreview();
         }
-        public void OnSelectionboxCalloutCreated(int Id) { }
-        public void OnSelectionboxCalloutDestroyed(int Id) { }
-        public bool OnSubmitSelection(int Id, object Selection, int SelType, ref string ItemText)
+        public override bool OnSubmitSelection(int Id, object Selection, int SelType, ref string ItemText)
         {
             // While the preview body is shown the real body is hidden, so clicks land on the preview.
             // Map a clicked preview edge back to the real edge and select that instead.
@@ -628,16 +580,7 @@ namespace MfgChamfer
             }
             if (best == null) Core.Log("MapToReal: no real edge near preview edge");
             return best;
-        }        public int OnActiveXControlCreated(int Id, bool Status) { return 0; }
-        public void OnSliderPositionChanged(int Id, double Value) { }
-        public void OnSliderTrackingCompleted(int Id, double Value) { }
-        public bool OnKeystroke(int Wparam, int Message, int Lparam, int Id) { return false; }
-        public void OnPopupMenuItem(int Id) { if (Id == IdMenuReverse) ToggleCurrent(null); }
-        public void OnPopupMenuItemUpdate(int Id, ref int retval) { }
-        public void OnGainedFocus(int Id) { }
-        public void OnLostFocus(int Id) { }
-        public int OnWindowFromHandleControlCreated(int Id, bool Status) { return 0; }
-        public void OnListboxRMBUp(int Id, int PosX, int PosY) { }
-        public void OnNumberBoxTrackingCompleted(int Id, double Value) { }
+        }
+        public override void OnPopupMenuItem(int Id) { if (Id == IdMenuReverse) ToggleCurrent(null); }
     }
 }

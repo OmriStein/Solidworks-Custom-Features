@@ -17,43 +17,12 @@ namespace MfgChamfer
     // Macro feature handler (lives in the FeatureManager tree)
     // ------------------------------------------------------------------------------------------
     [ComVisible(true), Guid("5AC68A5E-93E8-44F3-A45D-EBF2DBD49154"), ProgId(MacroFeature.ProgIdName)]
-    public class MacroFeature : ISwComFeature
+    public class MacroFeature : FeatureBase   // (the class name is part of the COM registration of existing installs: keep it)
     {
         public const string ProgIdName = "MfgChamfer.Feature";
 
-        public static string[] Icons()
-        {
-            // regular / suppressed / highlighted for each size (SOLIDWORKS picks by DPI)
-            var list = new List<string>();
-            foreach (var s in new[] { 20, 32, 40 })
-                foreach (var st in new[] { "reg", "sup", "hl" })
-                    list.Add(Addin.Icon("feat_" + st + "_" + s + ".png"));
-            return list.ToArray();
-        }
-
-        public object Edit(object app, object modelDoc, object feature)
-        {
-            try
-            {
-                var model = (IModelDoc2)modelDoc;
-                var feat = (IFeature)feature;
-                var data = (IMacroFeatureData)feat.GetDefinition();
-                if (!data.AccessSelections(model, null)) return false;
-                new ChamferPage((ISldWorks)app, model, feat, data).Show();
-                return true;
-            }
-            catch (Exception e) { MessageBox.Show("CNC Chamfer:\n" + e); return false; }
-        }
-
-        public object Regenerate(object app, object modelDoc, object feature)
-        {
-            try { return Engine.Build((ISldWorks)app, (IFeature)feature); }
-            catch (Exception e) { Core.Log(e.ToString()); return "CNC Chamfer: " + e.Message; }
-        }
-
-        public object Security(object app, object modelDoc, object feature)
-        {
-            return (int)swMacroFeatureSecurityOptions_e.swMacroFeatureSecurityByDefault;
-        }
+        protected override string Title { get { return ChamferDef.Title; } }
+        protected override object Build(ISldWorks sw, IFeature feat) { return Engine.Build(sw, feat); }
+        protected override void ShowPage(ISldWorks sw, IModelDoc2 model, IFeature feat, IMacroFeatureData data) { new ChamferPage(sw, model, feat, data).Show(); }
     }
 }
