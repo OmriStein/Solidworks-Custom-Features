@@ -30,3 +30,5 @@ In SOLIDWORKS the add-in is listed as **Custom-Features** in Tools > Add-Ins.
 ## Development
 `build.bat` only rebuilds the DLL (SOLIDWORKS must be closed, it locks the DLL);
 `dev.ps1` closes SOLIDWORKS, rebuilds and restarts it. Test parts are in `test\`.
+
+Source layout: `src\Core` (add-in host and the feature base classes), `src\Geometry` (shared geometry helpers), `src\Features\<Name>` (one folder per feature, currently CncChamfer). To add a feature see [docs/adding-new-feature.md](docs/adding-new-feature.md).
