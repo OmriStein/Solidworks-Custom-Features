@@ -333,9 +333,7 @@ namespace MfgChamfer
                 {
                     var vtxc = ends[k]; var axc = blend.ConeAxis[k];
                     
-                    if (blend.ConeShift[k] == null) list.Add(Cone(Add(vtxc, Scale(axc, d1)), axc, d1, Math.PI / 2 - beta, 10 * Math.Max(d1, hB), modeler));   // the nominal corner cone (with a tip offset only the slid one)
-                    var dsc = blend.ConeShift[k];   // tip offset: plus the cone slid along the line where the two chamfer planes meet (the cutout grows with the bigger cutting edge)
-                    if (dsc != null) { double hcc = d1 + Dot(dsc, axc); if (hcc > 1e-6) list.Add(Cone(Add(Add(vtxc, Scale(axc, d1)), dsc), axc, hcc, Math.PI / 2 - beta, 10 * Math.Max(d1 + Len(dsc), hB), modeler)); }
+                    list.Add(Cone(Add(vtxc, Scale(axc, d1)), axc, d1, Math.PI / 2 - beta, 10 * Math.Max(d1, hB), modeler));
                 }
                 else if (blk[k])   // reversed: the mill comes in square to the wall (5-axis), so its runout cone has a radial axis
                 {
@@ -348,7 +346,7 @@ namespace MfgChamfer
             double cot = 1 / Math.Tan(flip ? betaW : beta), hC = flip ? d1 * Math.Sin(phi) : hB + tip;
             if (expected != null)
                 expected[0] = 0.5 * d1 * d2 * Math.Sin(phi) * (R + rhoA + rhoB) / 3 * sp
-                            + Enumerable.Range(0, 2).Where(kk => blk[kk]).Sum(kk => blend != null && blend.ConeAxis[kk] != null ? Math.PI / 3 * Math.Pow(d1 + (blend != null && blend.ConeShift[kk] != null ? Len(blend.ConeShift[kk]) : 0), 3) * Math.Tan(beta) * Math.Tan(beta) : Math.PI * hC * hC * hC * cot * cot / 3);
+                            + Enumerable.Range(0, 2).Where(kk => blk[kk]).Sum(kk => blend != null && blend.ConeAxis[kk] != null ? Math.PI / 3 * Math.Pow(d1, 3) * Math.Tan(beta) * Math.Tan(beta) : Math.PI * hC * hC * hC * cot * cot / 3);
             if (lines != null)
             {
                 bool full = span > 2 * Math.PI - 1e-6;
@@ -368,10 +366,7 @@ if (!blk[k]) continue;
                         var axw = blend.ConeAxis[k]; var vtw = ends[k];
                         double[] u1w = blend.ConeWall == null ? null : Sub(Scale(blend.ConeWall, -1), Scale(axw, Dot(Scale(blend.ConeWall, -1), axw)));
                         
-                        var dsw = new double[3];   // the nominal cone; the slid one is drawn after it
-                        double hw = d1 + Dot(dsw, axw); if (hw < 1e-6) { hw = d1; dsw = new double[3]; }
-                        if (blend.ConeShift[k] == null) ConeLines(lines, Add(Add(vtw, Scale(axw, d1)), dsw), vtw, hw * Math.Tan(beta), axw, u1w != null && Len(u1w) > 1e-6 ? Norm(u1w) : null, blend.ConeDown[k], RimCornerOutside(vtw, blend.ConeDown[k], blend.ConeGeom[k]));
-                        if (blend.ConeShift[k] != null) { var dsl = blend.ConeShift[k]; double hw2 = d1 + Dot(dsl, axw); if (hw2 > 1e-6) ConeLines(lines, Add(Add(vtw, Scale(axw, d1)), dsl), vtw, hw2 * Math.Tan(beta), axw, u1w != null && Len(u1w) > 1e-6 ? Norm(u1w) : null, blend.ConeDown[k], RimCornerOutside(vtw, blend.ConeDown[k], blend.ConeGeom[k])); }
+                        ConeLines(lines, Add(vtw, Scale(axw, d1)), vtw, d1 * Math.Tan(beta), axw, u1w != null && Len(u1w) > 1e-6 ? Norm(u1w) : null, blend.ConeDown[k], RimCornerOutside(vtw, blend.ConeDown[k], blend.ConeGeom[k]));
                         continue;
                     }
                     double ak = dir * (k == 0 ? st0 : span - st1);
