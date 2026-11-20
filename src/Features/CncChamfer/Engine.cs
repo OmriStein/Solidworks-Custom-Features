@@ -434,8 +434,8 @@ namespace MfgChamfer
 
             double stop = p.ToolDia / 2 + p.Clearance;
             bool e0 = blend.End[0], e1 = blend.End[1];
-            bool b0 = !e0 && Blocked(v0, Scale(t, -1), n1, n2);
-            bool b1 = !e1 && Blocked(v1, t, n1, n2);
+            bool b0 = !e0 && (Blocked(v0, Scale(t, -1), n1, n2) || !blend.Join[0] && RunsOn(v0, f1, f2, n1, n2));   // a rim that falls away past the end counts as a wall: stop short and leave with a cone
+            bool b1 = !e1 && (Blocked(v1, t, n1, n2) || !blend.Join[1] && RunsOn(v1, f1, f2, n1, n2));
             bool k0 = b0 || blend.ConeEnd[0], k1 = b1 || blend.ConeEnd[1];   // ends that close with a runout cone
             double ext = Math.Max(d1, d2);
             double s0 = e0 ? blend.EndShift[0] : blend.Join[0] ? 0 : b0 ? stop : -ext;       // blended / joined ends run exactly to the corner / neighbour
@@ -634,6 +634,20 @@ namespace MfgChamfer
 
         // An end is blocked when another face at the vertex faces back along the edge (a wall).
         static bool Blocked(IVertex v, double[] outDir, double[] n1, double[] n2) { return Blocker(v, outDir, n1, n2) != null; }
+
+        // A third face at the vertex continues one of the edge's faces smoothly (e.g. the top turns into a rounded rim): the edge does not end on a wall, the surface just falls away
+        static bool RunsOn(IVertex v, IFace2 f1, IFace2 f2, double[] n1, double[] n2)
+        {
+            var pt = (double[])v.GetPoint(); double a1 = f1.GetArea(), a2 = f2.GetArea();
+            foreach (IFace2 f in (object[])v.GetAdjacentFaces())
+            {
+                double a = f.GetArea();
+                if (Math.Abs(a - a1) < 1e-12 || Math.Abs(a - a2) < 1e-12) continue;   // the edge's own faces
+                var n = FaceNormalAt(f, pt);
+                if (n != null && (Dot(n, n1) > 0.999 || Dot(n, n2) > 0.999)) return true;
+            }
+            return false;
+        }
 
         // Normal of the wall that blocks the edge's end at v (null: open end)
         static double[] Blocker(IVertex v, double[] outDir, double[] n1, double[] n2)
