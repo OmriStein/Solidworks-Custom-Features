@@ -114,7 +114,6 @@ if __name__ == "__main__":
     # PropertyManager title bitmap
     render(20).save(f"{out}/pm_title.png")
     # Add-in manager icon (16x16)
-    render(16).save(f"{out}/addin_16.png")
     open(f"{out}/master.svg", "w").write(svg())
     # preview sheet
     sheet = Image.new("RGBA", (560, 170), (255, 255, 255, 255))

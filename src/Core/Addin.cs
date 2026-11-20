@@ -34,9 +34,10 @@ namespace MfgChamfer
             get { return Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "CustomFeatures", "icons"); }
         }
 
-        public static string Icon(string name)
+        public static string Icon(string name, string dir = null)
         {
-            var path = Path.Combine(IconDir, name);
+            if (dir == null) dir = IconDir;
+            var path = Path.Combine(dir, name);
             try
             {
                 using (var s = typeof(Addin).Assembly.GetManifestResourceStream("icons." + name))
@@ -44,7 +45,7 @@ namespace MfgChamfer
                     if (s == null) return path;
                     var data = new byte[s.Length]; int n = 0;
                     while (n < data.Length) n += s.Read(data, n, data.Length - n);
-                    if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(data)) { Directory.CreateDirectory(IconDir); File.WriteAllBytes(path, data); }
+                    if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(data)) { Directory.CreateDirectory(dir); File.WriteAllBytes(path, data); }
                 }
             }
             catch { }   // a locked cache file keeps its old icon
@@ -134,9 +135,9 @@ namespace MfgChamfer
             else { try { cmdMgr.RemoveCommandGroup2(SpacerId, false); } catch { } }
 
             int err = 0;
-            var grp = cmdMgr.CreateCommandGroup2(GroupId, ToolbarTitle, ToolbarTitle, "Custom features", -1, true, ref err);
+            var grp = cmdMgr.CreateCommandGroup2(GroupId, ToolbarTitle, "Custom Features", "Custom features", -1, true, ref err);
             grp.IconList = icons;
-            grp.MainIconList = icons;
+            grp.MainIconList = new[] { 20, 32, 40, 64, 96, 128 }.Select(z => Icon("custom_features_" + z + ".png")).ToArray();   // the Custom-Features logo for the group itself
             var cmdIds = new List<int>();
             for (int i = 0; i < Features.Length; i++)
                 cmdIds.Add(grp.AddCommandItem2(Features[i].Name, -1, Features[i].Hint, Features[i].Name, Features[i].IconIndex, "OnInsert" + i, "OnEnable", i + 1,
@@ -270,7 +271,8 @@ namespace MfgChamfer
                 k.SetValue(null, 0, RegistryValueKind.DWord);
                 k.SetValue("Title", AddinTitle);
                 k.SetValue("Description", "Custom features for SOLIDWORKS (Insert > Custom-Features): " + string.Join(", ", Features.Select(f => f.Name)));
-                k.SetValue("Icon Path", Icon("addin_16.png"));
+                // next to the DLL, readable by every user (the add-in list reads it before the add-in loads; a per-user cache would be the installing admin's)
+                k.SetValue("Icon Path", Icon("custom_features_16.png", Path.GetDirectoryName(new Uri(t.Assembly.CodeBase).LocalPath)));
             }
             using (var s = Registry.CurrentUser.CreateSubKey(@"Software\SolidWorks\AddInsStartup\" + id))
                 s.SetValue(null, 1, RegistryValueKind.DWord);
