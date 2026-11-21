@@ -4,7 +4,17 @@ SOLIDWORKS 2026 add-in (C#, .NET Framework 4, x64) that hosts custom features un
 
 ## CNC Chamfer
 
+Straight edge: size and chamfer angle.
+
 ![CNC Chamfer demo](docs/cnc-chamfer.gif)
+
+A tangent chain of edges (Tangent propagation).
+
+![CNC Chamfer tangent chain](docs/cnc-chamfer-chain.gif)
+
+Tool diameter, tip offset and reverse direction.
+
+![CNC Chamfer tool options](docs/cnc-chamfer-tool.gif)
 
 A chamfer that can actually be machined with a chamfer mill (default 45 deg chamfer = 90 deg mill; the mill angle is 180 deg minus twice the chamfer angle):
 - Straight convex edges at any angle between the faces, with a chamfer distance (on the mill's face) and a chamfer angle.
