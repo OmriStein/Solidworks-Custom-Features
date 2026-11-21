@@ -31,9 +31,12 @@ namespace MfgChamfer
             if (src == null) src = eb as IBody2;
             if (src == null) src = data.EditBody as IBody2;
             if (src == null) throw new Exception("no body to modify");
-            var pristine = ((object[])((IBody2)src.Copy()).GetFaces()).Cast<IFace2>().ToList();
+            var pristineBody = (IBody2)src.Copy();   // kept alive until the end: its faces are compared with the new ones
+            var pristine = ((object[])pristineBody.GetFaces()).Cast<IFace2>().ToList();
 
-            var tool = Tool((IModeler)sw.GetModeler(), edge, p);
+            var modeler = (IModeler)sw.GetModeler();
+            var tool = Tool(modeler, edge, p);
+            var fill = Fill(modeler, edge, p);   // closes the corner between the wall and the corner arc; built before the cut (the edge belongs to the body being cut)
             double before = Volume(src), toolVol = Volume(tool);
             int err;
             var res = src.Operations2((int)swBodyOperationType_e.SWBODYCUT, tool, out err) as object[];
@@ -42,6 +45,12 @@ namespace MfgChamfer
             double removed = before - Volume(work);
             if (removed <= 1e-15) throw new Exception("the undercut removes nothing");
             if (removed > toolVol * 1.002) throw new Exception("the undercut cuts more than its profile");
+            if (fill != null)
+            {
+                var res2 = work.Operations2((int)swBodyOperationType_e.SWBODYADD, fill, out err) as object[];
+                if (res2 == null || res2.Length == 0) throw new Exception("closing the wall corner failed (error " + err + ")");
+                work = Largest(res2);
+            }
 
             object faces, edgesNeed;
             data.GetEntitiesNeedUserId(work, out faces, out edgesNeed);
@@ -52,6 +61,7 @@ namespace MfgChamfer
             foreach (var f in fresh) if (!need.Any(n => n.IsSame(f))) data.SetFaceUserId((Face2)f, id++, 0);
             id = 0;
             foreach (var e in (edgesNeed as object[]) ?? new object[0]) data.SetEdgeUserId((Edge)e, id++, 0);
+            GC.KeepAlive(pristineBody);
             return work;
         }
 
@@ -97,6 +107,14 @@ namespace MfgChamfer
             ax = Dot(axis, nWall) >= 0 ? axis : Scale(axis, -1);
             var nCyl = FaceNormalAt(cyl, pt);
             bore = Dot(nCyl, rd) < 0;   // cylinder face turned towards the axis: a hole
+        }
+
+        public static IBody2 Fill(IModeler m, IEdge edge, Din509Params p)
+        {
+            double[] o, ax, rd; double R; bool bore;
+            Frame(edge, out o, out ax, out rd, out R, out bore);
+            var prof = Din509Table.Fill(p.FormChar, R, p.R, p.T1, p.T2, bore);
+            return prof == null ? null : Revolve(m, o, ax, rd, prof);
         }
 
         public static IBody2 Tool(IModeler m, IEdge edge, Din509Params p)
