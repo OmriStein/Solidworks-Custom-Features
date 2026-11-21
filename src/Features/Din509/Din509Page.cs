@@ -18,8 +18,8 @@ namespace MfgChamfer
     {
         const int IdSel = 10, IdForm = 20, IdSize = 21;
         static readonly string[] FormNames = { "E   no wall cut", "F   wall flank 8\u00B0", "G   small included angle (55\u00B0)", "H   large included angle (60\u00B0)" };
-        const string Hint = "Select the circular edge where the shaft meets the shoulder (the inner corner), then the undercut form and size.\n" +
-                            "Sizes listed fit the shaft diameter (DIN 509, Table 1).";
+        const string Hint = "Select the circular edge where the shaft or bore meets the shoulder (the inner corner), then the undercut form and size.\n" +
+                            "Sizes listed fit the diameter (DIN 509, Table 1; for bores the standard applies the same values by analogy).";
         readonly ISldWorks sw;
         readonly IModelDoc2 model;
         readonly IFeature feat;            // null when inserting

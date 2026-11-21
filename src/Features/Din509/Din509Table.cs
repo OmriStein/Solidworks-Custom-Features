@@ -62,9 +62,9 @@ namespace MfgChamfer
         }
 
         // Profile in the half-plane through the shaft axis. a = along the shaft from the shoulder wall, r = distance from the axis.
-        // R = shaft radius, rr = undercut radius, t1 = depth, t2 = recess into the wall, f = width (F / E; G / H derive it). Metres.
+        // R = shaft (or bore) radius, bore = undercut in a bore, rr = undercut radius, t1 = depth, t2 = recess into the wall, f = width (F / E; G / H derive it). Metres.
         // Returns segments { a1, r1, a2, r2, ca, cr } (NaN centre = line) of the closed cutting profile; fOut = the width the profile has at the shaft surface.
-        public static List<double[]> Profile(char form, double R, double rr, double t1, double t2, double f, out double fOut)
+        public static List<double[]> Profile(char form, double R, double rr, double t1, double t2, double f, bool bore, out double fOut)
         {
             double al = ShaftAngle(form) * Math.PI / 180, th = WallAngle(form) * Math.PI / 180;
             double cosT = Math.Cos(th), sinT = Math.Sin(th), cosA = Math.Cos(al), sinA = Math.Sin(al);
@@ -80,7 +80,7 @@ namespace MfgChamfer
             if (form == 'E') yTop = -0.5 * (rr - t1);
             else { yTop = pY - t2 / Math.Tan(th) - 1e-4; wTopS = pS + (pY - yTop) * Math.Tan(th); }   // 0.1 mm above where the wall flank leaves the wall plane
             double fTopS = qS + (qY - yTop) / Math.Tan(al);
-            Func<double, double> rad = y => R - y;
+            Func<double, double> rad = y => bore ? R + y : R - y;   // bore: the groove goes outward from the hole wall
             var seg = new List<double[]>();
             double n = double.NaN;
             double[] start;
@@ -94,8 +94,16 @@ namespace MfgChamfer
                 if (sc > sa + 1e-9) seg.Add(new[] { sa, rad(t1), sc, rad(t1), n, n });
                 seg.Add(new[] { sc, rad(t1), qS, rad(qY), sc, rad(yc) });
             }
-            seg.Add(new[] { qS, rad(qY), fTopS, rad(yTop), n, n });
-            seg.Add(new[] { fTopS, rad(yTop), start[0], start[1], n, n });
+            // Round the flank into the shaft surface (tangent arc) so there is no sharp edge where the undercut ends.
+            // The arc stops eps below the surface (a tool face tangent to the cylinder would break the boolean).
+            double eps = 2e-5, sf = qS + (qY - eps) / Math.Tan(al);
+            double rb = 0.95 * (qY - eps) / sinA / Math.Tan(al / 2), L = rb * Math.Tan(al / 2);   // the blend uses (almost) the whole flank
+            double t1S = sf - L * cosA, t1Y = eps + L * sinA, t2S = sf + L, cS = sf + L, cY = eps + rb;
+            seg.Add(new[] { qS, rad(qY), t1S, rad(t1Y), n, n });
+            seg.Add(new[] { t1S, rad(t1Y), t2S, rad(eps), cS, rad(cY) });
+            seg.Add(new[] { t2S, rad(eps), t2S, rad(yTop), n, n });
+            seg.Add(new[] { t2S, rad(yTop), start[0], start[1], n, n });
+            foreach (var s in seg) if (s[1] <= 1e-6 || s[3] <= 1e-6) throw new Exception("the bore is too small for this undercut");
             return seg;
         }
     }

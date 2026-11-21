@@ -66,19 +66,19 @@ namespace MfgChamfer
             return null;
         }
 
-        // Shaft radius and the diameter d1 (mm) of a shoulder edge; throws when it is not the inner corner of a shaft shoulder
+        // Shaft (or bore) radius of a shoulder edge; throws when it is not the inner corner of a shoulder
         public static double ShaftRadius(IEdge edge)
         {
-            double[] o, ax, rd; double R; Frame(edge, out o, out ax, out rd, out R);
+            double[] o, ax, rd; double R; bool bore; Frame(edge, out o, out ax, out rd, out R, out bore);
             return R;
         }
 
         // The undercut's frame at a shoulder edge: o = centre of the edge circle (in the wall plane), ax = along the shaft away from the
         // wall, rd = radial, R = shaft radius
-        static void Frame(IEdge edge, out double[] o, out double[] ax, out double[] rd, out double R)
+        static void Frame(IEdge edge, out double[] o, out double[] ax, out double[] rd, out double R, out bool bore)
         {
             var c = (ICurve)edge.GetCurve();
-            if (!c.IsCircle()) throw new Exception("select the circular edge where the shaft meets the shoulder");
+            if (!c.IsCircle()) throw new Exception("select the circular edge where the shaft or bore meets the shoulder");
             var cp = (double[])c.CircleParams;
             o = new[] { cp[0], cp[1], cp[2] };
             R = cp[6];
@@ -90,21 +90,21 @@ namespace MfgChamfer
                 var s = (ISurface)f.GetSurface();
                 if (s.IsPlane()) plane = f; else if (s.IsCylinder()) cyl = f;
             }
-            if (plane == null || cyl == null) throw new Exception("the edge must lie between a cylinder (the shaft) and a plane (the shoulder)");
+            if (plane == null || cyl == null) throw new Exception("the edge must lie between a cylinder (shaft or bore) and a plane (the shoulder)");
             var pt = Ends(edge)[0];
             rd = Norm(Sub(pt, o));
             var nWall = FaceNormalAt(plane, pt);
             ax = Dot(axis, nWall) >= 0 ? axis : Scale(axis, -1);
             var nCyl = FaceNormalAt(cyl, pt);
-            if (Dot(nCyl, rd) <= 0) throw new Exception("undercuts in bores are not supported yet (select the shoulder edge of a shaft)");
+            bore = Dot(nCyl, rd) < 0;   // cylinder face turned towards the axis: a hole
         }
 
         public static IBody2 Tool(IModeler m, IEdge edge, Din509Params p)
         {
-            double[] o, ax, rd; double R;
-            Frame(edge, out o, out ax, out rd, out R);
+            double[] o, ax, rd; double R; bool bore;
+            Frame(edge, out o, out ax, out rd, out R, out bore);
             double fOut;
-            var prof = Din509Table.Profile(p.FormChar, R, p.R, p.T1, p.T2, p.F, out fOut);
+            var prof = Din509Table.Profile(p.FormChar, R, p.R, p.T1, p.T2, p.F, bore, out fOut);
             return Revolve(m, o, ax, rd, prof);
         }
     }
