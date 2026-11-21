@@ -23,7 +23,7 @@ namespace MfgChamfer
         const int GroupId = 52711;
         public static ISldWorks Sw;
         // One entry per feature: the command group, toolbar, Features-tab box and Copy / Paste hook are built from this list.
-        static readonly FeatureDef[] Features = { new ChamferDef() };   // shortcut: OnInsert0..3 below, so at most 4 features; add OnInsertN to go further
+        static readonly FeatureDef[] Features = { new ChamferDef(), new Din509Def() };   // shortcut: OnInsert0..3 below, so at most 4 features; add OnInsertN to go further
         ICommandManager cmdMgr;
         int cookie;
         static readonly int Part = (int)swDocumentTypes_e.swDocPART;

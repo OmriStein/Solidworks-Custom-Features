@@ -23,7 +23,7 @@ namespace MfgChamfer
         protected readonly List<object> keep = new List<object>();
         string pageTitle;
 
-        protected void CreatePage(ISldWorks sw, string title, string hint)
+        protected void CreatePage(ISldWorks sw, string title, string hint, string titleIcon = "pm_title.png")
         {
             int err = 0;
             int opts = (int)(swPropertyManagerPageOptions_e.swPropertyManagerOptions_OkayButton |
@@ -32,7 +32,7 @@ namespace MfgChamfer
             pageTitle = title;
             page = (IPropertyManagerPage2)sw.CreatePropertyManagerPage(title, opts, this, ref err);
             if (page == null) throw new Exception("could not create PropertyManager page (" + err + ")");
-            try { page.SetTitleBitmap2(Addin.Icon("pm_title.png")); } catch { }
+            try { page.SetTitleBitmap2(Addin.Icon(titleIcon)); } catch { }
             Message(hint);
         }
 

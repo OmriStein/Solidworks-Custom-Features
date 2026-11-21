@@ -261,6 +261,37 @@ namespace MfgChamfer
             return line.CreateTrimmedCurve2(a[0], a[1], a[2], b[0], b[1], b[2]);
         }
 
+        // Solid of revolution (360 deg) from a closed profile in the half-plane through the axis (origin o, direction ax, radial direction rd).
+        // seg = { a1, r1, a2, r2, ca, cr }: a = along the axis, r = distance from it; ca/cr = arc centre (NaN: straight line).
+        // Each segment is revolved into a sheet (line -> plane / cylinder / cone, arc -> torus) and the sheets are knitted into a solid.
+        public static IBody2 Revolve(IModeler m, double[] o, double[] ax, double[] rd, IList<double[]> segs)
+        {
+            Func<double, double, double[]> P = (a, r) => Add(o, Add(Scale(ax, a), Scale(rd, r)));
+            var sheets = new List<Body2>();
+            foreach (var s in segs)
+            {
+                var p = P(s[0], s[1]); var q = P(s[2], s[3]);
+                ICurve c;
+                if (double.IsNaN(s[4])) c = ((ICurve)m.CreateLine(p, Sub(q, p))).CreateTrimmedCurve2(p[0], p[1], p[2], q[0], q[1], q[2]);
+                else
+                {
+                    var cc = P(s[4], s[5]);
+                    double cross = (s[0] - s[4]) * (s[3] - s[5]) - (s[1] - s[5]) * (s[2] - s[4]);   // sense of the arc in the (a, r) plane
+                    var nrm = Cross(ax, rd); if (cross < 0) nrm = Scale(nrm, -1);
+                    c = ((ICurve)m.CreateArc(cc, nrm, Dist(cc, p), p, q)).CreateTrimmedCurve2(p[0], p[1], p[2], q[0], q[1], q[2]);
+                }
+                double u0, u1; bool closed, periodic;
+                c.GetEndParams(out u0, out u1, out closed, out periodic);
+                var surf = (ISurface)m.CreateRevolutionSurface(c, o, ax, new[] { u0, u1 });
+                var sheet = surf == null ? null : m.CreateSheetFromSurface(surf, new[] { u0, u1, 0, 2 * Math.PI }) as Body2;
+                if (sheet == null) throw new Exception("could not revolve the undercut profile");
+                sheets.Add(sheet);
+            }
+            int err = 0;
+            var res = m.CreateBodiesFromSheets2(sheets.ToArray(), (int)swSheetSewingOption_e.swSewToSolid, 1e-6, ref err) as object[];
+            if (res == null || res.Length != 1 || ((IBody2)res[0]).GetType() != (int)swBodyType_e.swSolidBody) throw new Exception("could not close the undercut profile (sewing error " + err + ")");
+            return (IBody2)res[0];
+        }
         // Chamfer-mill footprint: cone with its tip (apex) on the chamfer's bottom edge, axis normal to the mill's face,
         // hB deep below that face; half angle = 90 deg - chamfer angle.
         public static IBody2 Cone(double[] apex, double[] axis, double hB, double beta, double stop, IModeler modeler)
