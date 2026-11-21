@@ -102,6 +102,14 @@ namespace MfgChamfer
             return seg;
         }
 
+        // y (below the shaft surface, so negative = above it) of the circle where the undercut leaves the shoulder wall: E at the tangent point, F G H where the wall flank leaves the wall plane
+        public static double WallDepth(char form, double rr, double t1, double t2)
+        {
+            if (form == 'E') return t1 - rr;
+            double th = WallAngle(form) * Math.PI / 180, yc = t1 - rr, sa = rr - t2;
+            return yc - rr * Math.Sin(th) - (rr * Math.Cos(th) - sa) / Math.Tan(th);
+        }
+
         // Material that closes the corner between the shoulder wall and the corner arc when the arc meets the wall plane above the shaft
         // surface (E always; H): the wall then runs on into the arc. Null when there is nothing to fill. Added after the cut; it reaches
         // 0.1 mm into the collar and 0.2 mm into the shaft so the union overlaps.

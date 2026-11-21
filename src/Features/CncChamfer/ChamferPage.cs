@@ -350,10 +350,14 @@ namespace MfgChamfer
                     : 0xB4B4B4;
                 try { Engine.FaceLines(result, ((object[])orig.GetFaces()).Cast<IFace2>().ToList(), plans, lines); }
                 catch (Exception ex) { Core.Log("face lines: " + ex.Message); }
-                result.Display3(model, color, (int)swTempBodySelectOptions_e.swTempBodySelectable);
-                preview.Add(result);
-                orig.DisableDisplay = true;
-                hidden = orig;
+                if (!Core.Sectioned(model))   // in a section view the preview body would show the cut-away part: leave the real part and draw only the strokes
+                {
+                    result.Display3(model, color, (int)swTempBodySelectOptions_e.swTempBodySelectable);
+                    preview.Add(result);
+                    orig.DisableDisplay = true;
+                    hidden = orig;
+                }
+
 
                 const int yellow = 0x00FFFF;   // COLORREF (BGR): R=255 G=255 B=0
                 foreach (var ln in lines)

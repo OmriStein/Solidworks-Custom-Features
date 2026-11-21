@@ -34,7 +34,24 @@ namespace MfgChamfer
             var pristineBody = (IBody2)src.Copy();   // kept alive until the end: its faces are compared with the new ones
             var pristine = ((object[])pristineBody.GetFaces()).Cast<IFace2>().ToList();
 
-            var modeler = (IModeler)sw.GetModeler();
+            var work = Cut((IModeler)sw.GetModeler(), src, edge, p);
+
+            object faces, edgesNeed;
+            data.GetEntitiesNeedUserId(work, out faces, out edgesNeed);
+            var need = ((faces as object[]) ?? new object[0]).Cast<IFace2>().ToList();
+            var fresh = ((object[])work.GetFaces()).Cast<IFace2>().Where(f => IsNewFace(f, pristine)).ToList();
+            int id = 0;
+            foreach (var f in need) data.SetFaceUserId((Face2)f, id++, 0);
+            foreach (var f in fresh) if (!need.Any(n => n.IsSame(f))) data.SetFaceUserId((Face2)f, id++, 0);
+            id = 0;
+            foreach (var e in (edgesNeed as object[]) ?? new object[0]) data.SetEdgeUserId((Edge)e, id++, 0);
+            GC.KeepAlive(pristineBody);
+            return work;
+        }
+
+        // The undercut cut into src (edge only supplies the geometry: it may belong to another body). Throws when it cannot be built.
+        public static IBody2 Cut(IModeler modeler, IBody2 src, IEdge edge, Din509Params p)
+        {
             var tool = Tool(modeler, edge, p);
             var fill = Fill(modeler, edge, p);   // closes the corner between the wall and the corner arc; built before the cut (the edge belongs to the body being cut)
             double before = Volume(src), toolVol = Volume(tool);
@@ -51,20 +68,46 @@ namespace MfgChamfer
                 if (res2 == null || res2.Length == 0) throw new Exception("closing the wall corner failed (error " + err + ")");
                 work = Largest(res2);
             }
-
-            object faces, edgesNeed;
-            data.GetEntitiesNeedUserId(work, out faces, out edgesNeed);
-            var need = ((faces as object[]) ?? new object[0]).Cast<IFace2>().ToList();
-            var fresh = ((object[])work.GetFaces()).Cast<IFace2>().Where(f => IsNewFace(f, pristine)).ToList();
-            int id = 0;
-            foreach (var f in need) data.SetFaceUserId((Face2)f, id++, 0);
-            foreach (var f in fresh) if (!need.Any(n => n.IsSame(f))) data.SetFaceUserId((Face2)f, id++, 0);
-            id = 0;
-            foreach (var e in (edgesNeed as object[]) ?? new object[0]) data.SetEdgeUserId((Edge)e, id++, 0);
-            GC.KeepAlive(pristineBody);
             return work;
         }
 
+        // Yellow preview strokes on the new faces of the cut result: their outline (each edge once), and across every face that lies between two
+        // circles about the shaft axis, strokes joining them (the face's hatch).
+        public static List<IBody2> Strokes(IModeler m, IEdge edge, IBody2 result, List<IFace2> origFaces)
+        {
+            double[] o, ax, rd; double R; bool bore;
+            Frame(edge, out o, out ax, out rd, out R, out bore);
+            var u = Cross(ax, rd);
+            Func<double, double, double, double[]> P = (a, r, ang) => Add(Add(o, Scale(ax, a)), Scale(Add(Scale(rd, Math.Cos(ang)), Scale(u, Math.Sin(ang))), r));
+            var res = new List<IBody2>();
+            Action<double[], double[]> line = (p0, p1) =>
+            {
+                if (Dist(p0, p1) < 1e-7) return;
+                var w = m.CreateWireBody(new[] { Seg(m, p0, p1) }, (int)swCreateWireBodyOptions_e.swCreateWireBodyByDefault) as IBody2;
+                if (w != null) res.Add(w);
+            };
+            var seen = new HashSet<string>();
+            Func<double[], string> key = q => Math.Round(q[0] * 1e7) + "," + Math.Round(q[1] * 1e7) + "," + Math.Round(q[2] * 1e7);
+            foreach (IFace2 f in (object[])result.GetFaces())
+            {
+                if (!IsNewFace(f, origFaces)) continue;
+                var rings = new List<double[]>();   // { axial position, radius } of the circles bounding the face
+                foreach (IEdge e in (object[])f.GetEdges())
+                {
+                    var pts = EdgePoints(e);
+                    var k = key(pts[0]) + ">" + key(pts[pts.Count / 2]) + ">" + key(pts[pts.Count - 1]);
+                    if (seen.Add(k)) for (int i = 0; i + 1 < pts.Count; i++) line(pts[i], pts[i + 1]);
+                    var c = (ICurve)e.GetCurve();
+                    if (!c.IsCircle()) continue;
+            var cp = (double[])c.CircleParams;
+                    double a = Dot(Sub(new[] { cp[0], cp[1], cp[2] }, o), ax);
+                    if (!rings.Any(q => Math.Abs(q[0] - a) < 1e-7 && Math.Abs(q[1] - cp[6]) < 1e-7)) rings.Add(new[] { a, cp[6] });
+                }
+                if (rings.Count != 2) continue;
+                for (int k = 0; k < 16; k++) { double ang = k * 2 * Math.PI / 16; line(P(rings[0][0], rings[0][1], ang), P(rings[1][0], rings[1][1], ang)); }
+            }
+            return res;
+        }
         public static IEdge SelectedEdge(IMacroFeatureData data)
         {
             object objs, types, marks, views, comps;
@@ -89,6 +132,8 @@ namespace MfgChamfer
         {
             var c = (ICurve)edge.GetCurve();
             if (!c.IsCircle()) throw new Exception("select the circular edge where the shaft or bore meets the shoulder");
+            var en = Ends(edge);   // a shoulder is a whole circle: an arc (a pocket corner, say) has two different ends
+            if (Dist(en[0], en[en.Length - 1]) > 1e-7) throw new Exception("select the complete circular edge, all the way round the shaft or bore (not an arc such as a pocket corner)");
             var cp = (double[])c.CircleParams;
             o = new[] { cp[0], cp[1], cp[2] };
             R = cp[6];
@@ -106,6 +151,9 @@ namespace MfgChamfer
             var nWall = FaceNormalAt(plane, pt);
             ax = Dot(axis, nWall) >= 0 ? axis : Scale(axis, -1);
             var nCyl = FaceNormalAt(cyl, pt);
+            var bx = (double[])cyl.GetBox();   // the shaft or bore must run away from the wall: its face lies on the ax side of the edge
+            if (Dot(Sub(new[] { (bx[0] + bx[3]) / 2, (bx[1] + bx[4]) / 2, (bx[2] + bx[5]) / 2 }, o), ax) <= 0)
+                throw new Exception("select the inner corner of a shoulder: the shaft or bore must run away from the wall");
             bore = Dot(nCyl, rd) < 0;   // cylinder face turned towards the axis: a hole
         }
 
