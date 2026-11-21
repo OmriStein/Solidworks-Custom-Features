@@ -15,7 +15,16 @@ A chamfer that can actually be machined with a chamfer mill (default 45 deg cham
 - Corner blends where a rim arc meets an edge that rises from its face: another arc (e.g. a rounded pocket corner) or a straight edge, including a drafted (leaning) wall. The rim ends flush and the rising edge closes with the mill's corner cone. Reverse direction still applies to these edges.
 - Blend the chamfers around an inside corner (radius = chamfer distance; any chamfer angle, any corner angle).
 - Optional flat corner where three chamfers meet (like the native Chamfer; any chamfer angle and corner angles).
-- Live native-style preview, edit, Ctrl+C / Ctrl+V of the feature settings.
+- Live native-style preview (in a section view only the outline strokes are drawn), edit, Ctrl+C / Ctrl+V of the feature settings.
+
+## DIN 509 Undercut
+
+Relief grooves (undercuts) at a shoulder, per DIN 509:2006-12, for shafts and bores. Pick the circular edge where the shaft or bore meets the shoulder (the inner corner), then the form and size:
+- Forms E, F, G and H with the flank angles of the standard (E has a square wall, F leans the wall 8 deg, G and H are the large-angle forms). The wall flank runs tangentially into the corner arc, the shaft flank is a straight line (15 deg, 17.5 deg for G) out to the surface, and the corner between the wall and the arc is filled so there is no small step.
+- The size list (radius x depth, with the standard's series and "higher load" variants) is filtered by the diameter d1 as in Table 1; for bores the same values are used by analogy. The recess into the shoulder wall (t2) is measured at the deepest point of the corner arc. The manufacturing allowances z1 / z2 are not modelled.
+- Shaft or bore is detected from the picked edge; a bore groove goes outward into the material.
+- Live native-style preview (the cut part with yellow outline and hatch strokes on the new faces; in a section view only the strokes are drawn). Pressing OK on a choice that cannot be built (an arc such as a pocket corner, the end of a shaft, a groove too big for the bore) keeps the page open and shows a tip.
+- Edit definition keeps the form and size. Ctrl+C on an undercut (tree item or one of its faces) remembers its form and size; Ctrl+V with one shoulder edge selected adds the same undercut there.
 
 ## Install
 **From a release:** download `CustomFeatures-vX.Y.Z.zip` from the GitHub Releases page, extract it to a permanent folder

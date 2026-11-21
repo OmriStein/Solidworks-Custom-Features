@@ -31,6 +31,47 @@ namespace MfgChamfer
         public override int IconIndex { get { return 1; } }
         public override void Insert(ISldWorks sw, IModelDoc2 model) { new Din509Page(sw, model, null, null).Show(); }
 
+        static Din509Params Clip;   // settings copied with Ctrl+C on a DIN 509 Undercut
+
+        // Ctrl+C / Ctrl+V as for the CNC Chamfer (SOLIDWORKS cannot copy macro features):
+        //   Copy  with a DIN 509 Undercut (tree item or one of its faces) selected -> remember its form and size
+        //   Paste with exactly one edge selected and settings remembered           -> new undercut at that shoulder edge
+        public override int OnCommandPre(ISldWorks sw, IModelDoc2 m, int Command)
+        {
+            if (m == null) return 0;
+            var sm = (ISelectionMgr)m.SelectionManager;
+            if (Command == CmdCopy || Command == CmdCut)
+            {
+                var f = SelectedUndercut(sm);
+                if (f == null) { Clip = null; return 0; }          // something else copied: let SW handle it
+                if (Command == CmdCut) return 0;
+                Clip = Din509Params.Read((IMacroFeatureData)f.GetDefinition());
+                return 1;
+            }
+            if (Command == CmdPaste && Clip != null)
+            {
+                if (sm.GetSelectedObjectCount2(-1) != 1 || sm.GetSelectedObjectType3(1, -1) != (int)swSelectType_e.swSelEDGES) return 0;
+                var edge = (IEdge)sm.GetSelectedObject6(1, -1);
+                try { Din509Engine.ShaftRadius(edge); }
+                catch (Exception ex) { sw.SendMsgToUser2(Title + ": " + ex.Message + ".", (int)swMessageBoxIcon_e.swMbStop, (int)swMessageBoxBtn_e.swMbOk); return 1; }
+                InsertFeature(sw, m, edge, Clip);
+                return 1;
+            }
+            return 0;
+        }
+
+        // The selected DIN 509 Undercut: the feature itself (tree) or the feature owning a selected face
+        static IFeature SelectedUndercut(ISelectionMgr sm)
+        {
+            if (sm.GetSelectedObjectCount2(-1) != 1) return null;
+            var o = sm.GetSelectedObject6(1, -1);
+            var f = o as IFeature;
+            var face = o as IFace2;
+            if (f == null && face != null) f = face.GetFeature() as IFeature;
+            if (f == null || f.GetTypeName2() != "MacroFeature") return null;
+            var d = f.GetDefinition() as IMacroFeatureData;
+            return d != null && d.GetProgId() == Din509Engine.ProgIdName ? f : null;
+        }
         public static IFeature InsertFeature(ISldWorks sw, IModelDoc2 model, IEdge edge, Din509Params p)
         {
             var body = edge.GetBody();
