@@ -4,18 +4,6 @@ SOLIDWORKS 2026 add-in (C#, .NET Framework 4, x64) that hosts custom features un
 
 ## CNC Chamfer
 
-Straight edge: size and chamfer angle.
-
-![CNC Chamfer demo](docs/cnc-chamfer.gif)
-
-A tangent chain of edges (Tangent propagation).
-
-![CNC Chamfer tangent chain](docs/cnc-chamfer-chain.gif)
-
-Tool diameter, tip offset and reverse direction.
-
-![CNC Chamfer tool options](docs/cnc-chamfer-tool.gif)
-
 A chamfer that can actually be machined with a chamfer mill (default 45 deg chamfer = 90 deg mill; the mill angle is 180 deg minus twice the chamfer angle):
 - Straight convex edges at any angle between the faces, with a chamfer distance (on the mill's face) and a chamfer angle.
 - Circle and arc edges of holes, bosses and pocket corners (planar face + coaxial cylinder / cone); select a whole tangent chain of lines and arcs and the tools meet exactly at the joints. The mill axis follows the circle, so the chamfer is a cone.
@@ -29,7 +17,11 @@ A chamfer that can actually be machined with a chamfer mill (default 45 deg cham
 
 ## DIN 509 Undercut
 
-Relief grooves (undercuts) at a shoulder, per DIN 509:2006-12, for shafts and bores. Pick the circular edge where the shaft or bore meets the shoulder (the inner corner), then the form and size:
+Relief grooves (undercuts) at a shoulder, per DIN 509:2006-12, for shafts and bores. Pick the circular edge where the shaft or bore meets the shoulder (the inner corner), then the form and size (demo part: `test/Din509Demo.SLDPRT`).
+
+![DIN 509 shaft](docs/din509-shaft.gif)
+
+![DIN 509 bore](docs/din509-bore.gif)
 - Forms E, F, G and H with the flank angles of the standard (E has a square wall, F leans the wall 8 deg, G and H are the large-angle forms). The wall flank runs tangentially into the corner arc, the shaft flank is a straight line (15 deg, 17.5 deg for G) out to the surface, and the corner between the wall and the arc is filled so there is no small step.
 - The size list (radius x depth, with the standard's series and "higher load" variants) is filtered by the diameter d1 as in Table 1; for bores the same values are used by analogy. The recess into the shoulder wall (t2) is measured at the deepest point of the corner arc. The manufacturing allowances z1 / z2 are not modelled.
 - Shaft or bore is detected from the picked edge; a bore groove goes outward into the material.
