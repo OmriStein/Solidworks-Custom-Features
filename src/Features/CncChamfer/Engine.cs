@@ -438,8 +438,11 @@ namespace MfgChamfer
             bool b1 = !e1 && (Blocked(v1, t, n1, n2) || !blend.Join[1] && RunsOn(v1, f1, f2, n1, n2));
             bool k0 = b0 || blend.ConeEnd[0], k1 = b1 || blend.ConeEnd[1];   // ends that close with a runout cone
             double ext = Math.Max(d1, d2);
-            double s0 = e0 ? blend.EndShift[0] : blend.Join[0] ? 0 : b0 ? stop : -ext;       // blended / joined ends run exactly to the corner / neighbour
-            double s1 = e1 ? len - blend.EndShift[1] : blend.Join[1] ? len : b1 ? len - stop : len + ext;
+            var rel = new[] { new double[3], Scale(uF, d1), Scale(uG, d2) };   // chamfer triangle O, A, B relative to the edge's end
+            bool open0 = !(b0 || e0 || blend.Join[0]), open1 = !(b1 || e1 || blend.Join[1]);
+            double x0 = open0 ? OpenExt(v0, f1, f2, Scale(t, -1), rel, ext) : ext, x1 = open1 ? OpenExt(v1, f1, f2, t, rel, ext) : ext;   // open ends run on past the vertex, further where a draft leans away
+            double s0 = e0 ? blend.EndShift[0] : blend.Join[0] ? 0 : b0 ? stop : -x0;       // blended / joined ends run exactly to the corner / neighbour
+            double s1 = e1 ? len - blend.EndShift[1] : blend.Join[1] ? len : b1 ? len - stop : len + x1;
             if (s1 - s0 < 1e-6)
                 throw new Exception(string.Format(CultureInfo.InvariantCulture,
                     "edge ({0:0.###} mm) too short for a {1:0.###} mm tool between walls", len * 1000, p.ToolDia * 1000));
@@ -453,8 +456,7 @@ namespace MfgChamfer
                             + blend.Corners.Sum(c => c.Shifted ? Math.PI * rF * rF * (hB + o) / 3 : (2 * Math.PI - c.Gamma) * d1 * d1 * hB / 6);   // the cone's share in the material (upper bound)
                 // Open ends: the tool runs on past the end (prism extended by ext). Usually that is air, but it may
                 // shave material the end meets at an angle (e.g. an existing chamfer) - a real run-off, not a wall.
-                int open = (b0 || e0 || blend.Join[0] ? 0 : 1) + (b1 || e1 || blend.Join[1] ? 0 : 1);
-                expected[0] += open * aTri * ext;
+                expected[0] += aTri * ((open0 ? x0 : 0) + (open1 ? x1 : 0));
                 foreach (var f in blend.Flats)   // corner tetrahedron V-T1-T2-T3
                     expected[0] += 1.5 * Math.Abs(Dot(Sub(f[1], f[0]), Cross(Sub(f[2], f[0]), Sub(f[3], f[0])))) / 6;
             }
@@ -630,6 +632,23 @@ namespace MfgChamfer
                 for (int i = 0; i < 4; i++)
                     AddClipped(lines, apex, arc(Math.PI / 2 * i / 4), S, nG);
             }
+        }
+
+        // Open end: how far past the vertex the prism must run so the chamfer triangle (rel = O, A, B) clears every face that
+        // leans away along outDir (a draft). Never less than min.
+        // shortcut: uses the face's tangent plane at the vertex and caps at 100x min (draft under ~0.6 deg stops short), curved faces only approximately.
+        static double OpenExt(IVertex v, IFace2 f1, IFace2 f2, double[] outDir, double[][] rel, double min)
+        {
+            var pt = (double[])v.GetPoint(); double a1 = f1.GetArea(), a2 = f2.GetArea(), s = min;
+            foreach (IFace2 f in (object[])v.GetAdjacentFaces())
+            {
+                double a = f.GetArea();
+                if (Math.Abs(a - a1) < 1e-12 || Math.Abs(a - a2) < 1e-12) continue;   // the edge's own faces
+                var n = FaceNormalAt(f, pt); double c = n == null ? 0 : Dot(n, outDir);
+                if (c < 0.02) continue;   // not leaning away (a wall or a face along the edge)
+                foreach (var q in rel) s = Math.Max(s, -Dot(n, q) / c * 1.01);
+            }
+            return Math.Min(s, 100 * min);
         }
 
         // An end is blocked when another face at the vertex faces back along the edge (a wall).
