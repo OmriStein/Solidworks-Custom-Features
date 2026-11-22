@@ -4,6 +4,20 @@ SOLIDWORKS 2026 add-in (C#, .NET Framework 4, x64) that hosts custom features un
 
 ## CNC Chamfer
 
+Demo part: `test/BlendDemo.SLDPRT` (features CNC Chamfer16, 17 and 18).
+
+Chain of edges around the lower profile, with chamfers blended at the inside corners (1 mm, 45 deg, 6 mm mill):
+
+![CNC Chamfer 16](docs/cnc-chamfer-16.gif)
+
+Flat corner where three chamfers meet at the notch (tip offset 1 mm):
+
+![CNC Chamfer 17](docs/cnc-chamfer-17.gif)
+
+Edge ends that run into a wall: the chamfer stops short and finishes with the mill's cone:
+
+![CNC Chamfer 18](docs/cnc-chamfer-18.gif)
+
 A chamfer that can actually be machined with a chamfer mill (default 45 deg chamfer = 90 deg mill; the mill angle is 180 deg minus twice the chamfer angle):
 - Straight convex edges at any angle between the faces, with a chamfer distance (on the mill's face) and a chamfer angle.
 - Circle and arc edges of holes, bosses and pocket corners (planar face + coaxial cylinder / cone); select a whole tangent chain of lines and arcs and the tools meet exactly at the joints. The mill axis follows the circle, so the chamfer is a cone.
