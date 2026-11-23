@@ -255,7 +255,7 @@ namespace MfgChamfer
                 }
                 else if (blk[k])   // reversed: the mill comes in square to the wall (5-axis), so its runout cone has a radial axis
                 {
-                    if (!flip) { list.Add(Cone(bTip(dir * (k == 0 ? st0 : span - st1)), Scale(up, -1), hB + tip, beta, stop, modeler)); continue; }
+                    if (!flip) { list.Add(Cone(bTip(dir * (k == 0 ? st0 : span - st1)), Scale(up, -1), hB + tip, beta, p.ToolDia / 2, modeler)); continue; }
                     double a = dir * (k == 0 ? st0 : span - st1);
                     var rad = Add(Scale(rq, Math.Cos(a)), Scale(yq, Math.Sin(a)));
                     list.Add(Cone(Add(c, Scale(rad, rhoA)), Scale(rad, s), d1 * Math.Sin(phi), betaW, stop, modeler));

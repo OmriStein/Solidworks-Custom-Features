@@ -50,7 +50,8 @@ namespace MfgChamfer
             // Work on the edit body itself (SOLIDWORKS hands the macro feature its own copy). Copying it again
             // drops face identities, which made every face count as created by this feature.
             var work = src;
-            var pristine = ((object[])((IBody2)src.Copy()).GetFaces()).Cast<IFace2>().ToList();   // for "which faces are new"
+            var pristineBody = (IBody2)src.Copy();   // kept alive to the end: a collected wrapper disconnects its faces (RPC_E_DISCONNECTED in IsNewFace)
+            var pristine = ((object[])pristineBody.GetFaces()).Cast<IFace2>().ToList();   // for "which faces are new"
 
             var modeler = (IModeler)sw.GetModeler();
             var math = (IMathUtility)sw.GetMathUtility();
@@ -83,6 +84,7 @@ namespace MfgChamfer
             foreach (var f in fresh) if (!need.Any(n => n.IsSame(f))) data.SetFaceUserId((Face2)f, id++, 0);
             id = 0;
             foreach (var e in (edgesNeed as object[]) ?? new object[0]) data.SetEdgeUserId((Edge)e, id++, 0);
+            GC.KeepAlive(pristineBody);
             return work;
         }
 
@@ -464,6 +466,40 @@ namespace MfgChamfer
                 throw new Exception(string.Format(CultureInfo.InvariantCulture,
                     "edge ({0:0.###} mm) too short for a {1:0.###} mm tool between walls", len * 1000, p.ToolDia * 1000));
 
+            // The mill's shank (radius ToolDia/2, above the mill's face) sweeps along the whole edge: it must not touch a wall beside the chamfer.
+            if (!horiz && blend.Axis == null && blend.ConeWall == null && blend.Corners.Count == 0 && !e0 && !e1)
+            {
+                var relB = Add(Scale(uG, d2), latV);
+                var foot = Sub(relB, Scale(nF, Dot(relB, nF)));   // the mill axis, projected on the mill's face
+                var own = f1.GetBody() as IBody2;
+                double H = Math.Max(0.02, 4 * p.ToolDia);
+                Func<double, bool> hits = r =>
+                {
+                    try
+                    {
+                        var o2 = Add(Add(p0, Scale(t, s0)), foot);
+                        r -= 1e-6;   // touching the wall is fine
+                        var a = Scale(uF, -r); var b = Scale(uF, r); var c = Add(b, Scale(nF, H)); var d = Add(a, Scale(nF, H));
+                        double hit = 0;
+                        foreach (var tri in new[] { new[] { a, b, c }, new[] { a, c, d } })
+                        {
+                            int er; var res = ((IBody2)own.Copy()).Operations2((int)swBodyOperationType_e.SWBODYINTERSECT, Prism(o2, t, s1 - s0, tri[0], tri[1], tri[2], uF, modeler, math), out er) as object[];
+                            if (res != null) foreach (var rb in res) hit += Volume((IBody2)rb);
+                        }
+                        return hit > 1e-12;   // 0.001 mm3
+                    }
+                    catch { return false; }
+                };
+                if (own != null && hits(p.ToolDia / 2))
+                {
+                    double lo = rF, hi = p.ToolDia / 2;
+                    if (hits(lo))
+                        throw new Exception("the wall beside this edge is too close for the mill - no tool of this chamfer fits; use a smaller size or angle");
+                    for (int i = 0; i < 8; i++) { double mdl = (lo + hi) / 2; if (hits(mdl)) hi = mdl; else lo = mdl; }
+                    throw new Exception(string.Format(CultureInfo.InvariantCulture,
+                        "tool diameter too large: the mill would cut into the wall beside the chamfer - use a tool up to {0:0.##} mm", 2 * lo * 1000));
+                }
+            }
             if (expected != null)
             {
                 double inside = Math.Max(0, Math.Min(s1, len) - Math.Max(s0, 0));
@@ -513,7 +549,7 @@ namespace MfgChamfer
             Func<int, IBody2> endCone = k =>
             {
                 var ca = blend.ConeAxis[k];
-                if (ca == null) return Cone(apexAt(k == 0 ? s0 : s1), axis, hB + o, beta, stop, modeler);
+                if (ca == null) return Cone(apexAt(k == 0 ? s0 : s1), axis, hB + o, beta, p.ToolDia / 2, modeler);   // above the mill's face the cone may not grow wider than the tool
                 // the cone tangent to the chamfer plane along the line from its corner on F, with its apex on the axis through this end
                 var mb = Norm(Cross(t, Sub(Scale(uG, d2), Scale(uF, d1))));
                 double mc = Dot(mb, ca), sAx = Math.Abs(mc) > 0.2 ? d1 * Dot(mb, uF) / mc : -1;
