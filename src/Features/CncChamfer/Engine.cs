@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -346,6 +346,13 @@ namespace MfgChamfer
             }
         }
 
+        // How far a face reaches from the edge midpoint along u (in its plane): the closest point on the face to a far point that way
+        static double Reach(IFace2 f, double[] mid, double[] u)
+        {
+            var far = Add(mid, u);
+            var q = f.GetClosestPointOn(far[0], far[1], far[2]) as double[];
+            return q == null ? double.MaxValue : Dot(Sub(q, mid), u);
+        }
         public static IBody2 ApplyCut(IBody2 body, EdgeCut c)
         {
             double before = Volume(body);
@@ -353,7 +360,7 @@ namespace MfgChamfer
             {
                 int err;
                 var res = body.Operations2((int)swBodyOperationType_e.SWBODYCUT, t, out err) as object[];
-                if (res == null || res.Length == 0) throw new Exception("cut failed (error " + err + ")");
+                if (res == null || res.Length == 0) throw new Exception("the chamfer could not be cut (SOLIDWORKS error " + err + ") - it probably does not fit the part: try a smaller size, a different angle or a larger clearance");
                 body = Largest(res);
             }
             double removed = before - Volume(body);
@@ -423,7 +430,17 @@ namespace MfgChamfer
                     (Math.PI - phi) * 180 / Math.PI - 0.1, phi * 180 / Math.PI));
             double d1 = p.Size;                                    // leg on F
             double d2 = d1 * Math.Sin(beta) / Math.Sin(phi + beta);   // leg on G
-            double hB = d2 * Math.Sin(phi);                        // depth of the chamfer bottom (on G) below F
+            if (!horiz)   // say how big the chamfer may be instead of letting the cut fail with a bare error code
+            {
+                double rF1 = Reach(fromF1 ? f1 : f2, mid, uF), rG = Reach(fromF1 ? f2 : f1, mid, uG);
+                if (d1 > rF1 + 1e-6 || d2 > rG + 1e-6)
+                {
+                    double maxSize = Math.Min(rF1, rG * Math.Sin(phi + beta) / Math.Sin(beta)) * 1000;
+                    throw new Exception(string.Format(CultureInfo.InvariantCulture,
+                        "chamfer does not fit: it needs {0:0.##} mm on the mill's face and {1:0.##} mm on the other face, which are only {2:0.##} and {3:0.##} mm wide here - use a size up to {4:0.##} mm at this angle{5}",
+                        d1 * 1000, d2 * 1000, rF1 * 1000, rG * 1000, maxSize, d1 > rF1 + 1e-6 ? "" : ", or a smaller angle"));
+                }
+            }            double hB = d2 * Math.Sin(phi);                        // depth of the chamfer bottom (on G) below F
             double o = p.TipOffset;                                // the mill's apex sits this far below the chamfer's lower edge, on the extended chamfer line
             double rF = (hB + o) / Math.Tan(beta);                 // mill radius where its cone meets F
             var bma = Sub(Scale(uG, d2), Scale(uF, d1)); var lat0 = Sub(bma, Scale(axis, Dot(bma, axis)));
